@@ -41,6 +41,10 @@ homepage = "https://github.com/googleads/google-ads-mcp"
 repository = "https://github.com/googleads/google-ads-mcp.git"
 issues = "https://github.com/googleads/google-ads-mcp/issues"
 
+[tool.setuptools.packages.find]
+# Only ship the server package; skills/, docs/ and tests/ are not Python packages.
+include = ["ads_mcp*"]
+
 [project.scripts]
 google-ads-mcp = "ads_mcp.server:run_server"
 google-ads-mcp-update-gaql = "ads_mcp.update_references:update_gaql_resource_file"
