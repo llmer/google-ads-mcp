@@ -4,6 +4,13 @@ This repo contains the source code for running an
 [MCP](https://modelcontextprotocol.io) server that interacts with the
 [Google Ads API](https://developers.google.com/google-ads/api).
 
+> **Fork notice:** this is a fork of
+> [googleads/google-ads-mcp](https://github.com/googleads/google-ads-mcp) that
+> adds tools to create and manage campaigns, spend guardrails and an agent
+> skill (see [Managing campaigns](#managing-campaigns)). Install it from this
+> repository as described below; `google-ads-mcp` releases on PyPI are the
+> upstream version and do not include these tools.
+
 ## Tools
 
 The server uses the
@@ -163,7 +170,8 @@ first four steps, then follow
 [Install pipx](https://pipx.pypa.io/stable/#install-pipx).
 
 After a version has been published to PyPI, you can run that exact version
-instead of following the latest repository state:
+instead of following the latest repository state. PyPI releases are the
+upstream version, without the campaign management tools of this fork:
 
 ```shell
 pipx run --spec "google-ads-mcp==X.Y.Z" google-ads-mcp
@@ -394,7 +402,7 @@ popular clients.
           "args": [
             "run",
             "--spec",
-            "git+https://github.com/googleads/google-ads-mcp.git",
+            "git+https://github.com/llmer/google-ads-mcp.git",
             "google-ads-mcp"
           ],
           "env": {
@@ -417,7 +425,7 @@ popular clients.
           "args": [
             "run",
             "--spec",
-            "git+https://github.com/googleads/google-ads-mcp.git",
+            "git+https://github.com/llmer/google-ads-mcp.git",
             "google-ads-mcp"
           ],
           "env": {
@@ -449,7 +457,7 @@ The final file will look like this:
         "args": [
           "run",
           "--spec",
-          "git+https://github.com/googleads/google-ads-mcp.git",
+          "git+https://github.com/llmer/google-ads-mcp.git",
           "google-ads-mcp"
         ],
         "env": {
@@ -476,7 +484,7 @@ developer token.
     commands below refer to it as `$GOOGLE_ADS_MCP_DIR`.
 
     ```shell
-    git clone https://github.com/googleads/google-ads-mcp.git ~/src/google-ads-mcp
+    git clone https://github.com/llmer/google-ads-mcp.git ~/src/google-ads-mcp
     export GOOGLE_ADS_MCP_DIR=~/src/google-ads-mcp
     cd "$GOOGLE_ADS_MCP_DIR" && uv sync
     ```
