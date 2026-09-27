@@ -56,6 +56,9 @@ monetary amounts are given in the account currency (e.g. `25.5`), not micros.
   - `update_campaign_settings`: Location targeting mode (presence vs.
     presence or interest), device bid adjustments, and opting out of
     automatically created text assets and final URL expansion.
+  - `set_auto_apply_recommendations`: Pause (or re-enable) auto-applied
+    recommendations, which otherwise change keywords, match types, networks,
+    bidding and ads without review and bypass the spend guardrails.
 - `assets` namespace:
   - `list_assets`, `get_asset_group`: Existing assets, and the assets and
     signals of a Performance Max asset group.

@@ -187,3 +187,25 @@ class TestAddCampaignAssets(MutateToolTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSetAutoApplyRecommendations(MutateToolTestCase):
+
+    def test_pauses_enabled_subscriptions_and_counts_unknown(self):
+        def sub(rtype, status):
+            return {
+                "recommendation_subscription.resource_name": f"customers/1/recommendationSubscriptions/{rtype}",
+                "recommendation_subscription.type": rtype,
+                "recommendation_subscription.status": status,
+            }
+        self.search_results = [[
+            sub("USE_BROAD_MATCH_KEYWORD", "ENABLED"),
+            sub("KEYWORD", "PAUSED"),
+            sub("UNKNOWN", "ENABLED"),
+        ]]
+        result = campaigns.set_auto_apply_recommendations("1")
+        [operations] = self.mutate_calls()
+        updates = _ops(operations, "recommendation_subscription_operation", "update")
+        self.assertEqual([u.status.name for u in updates], ["PAUSED"])
+        self.assertEqual(result["changed"], ["USE_BROAD_MATCH_KEYWORD"])
+        self.assertEqual(result["unsupported_unknown_types"], 1)

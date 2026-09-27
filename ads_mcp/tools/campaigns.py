@@ -1431,3 +1431,70 @@ def update_campaign_settings(
 
     mutations.mutate(client, customer_id, operations, validate_only)
     return {"campaign_id": campaign_id, "changed": changed, "validate_only": validate_only}
+
+
+@campaigns_mcp.tool(annotations=_UPDATE)
+def set_auto_apply_recommendations(
+    customer_id: str | int,
+    status: Literal["PAUSED", "ENABLED"] = "PAUSED",
+    types: List[str] | None = None,
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Pauses (or re-enables) auto-applied recommendations for the whole account.
+
+    Auto-apply lets Google change campaigns without review: add keywords,
+    switch to broad match, turn on Display expansion, change bidding
+    strategies or targets, and rewrite ads. These changes bypass this
+    server's spend guardrails, so pausing them is recommended for accounts
+    managed through these tools.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        status: PAUSED (default) or ENABLED.
+        types: Recommendation types to change, e.g. ["USE_BROAD_MATCH_KEYWORD"].
+          Defaults to every subscription currently in the other status.
+        validate_only: If true, validates the request without changing anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The subscription types changed, and ones that could not be (types this
+        API version reports as UNKNOWN must be changed in the Google Ads UI).
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    rows = mutations.search(
+        client,
+        customer_id,
+        "SELECT recommendation_subscription.resource_name, "
+        "recommendation_subscription.type, recommendation_subscription.status "
+        "FROM recommendation_subscription",
+    )
+    wanted = {t.upper() for t in types} if types else None
+    operations, changed, unsupported = [], [], 0
+    for row in rows:
+        rtype = row["recommendation_subscription.type"]
+        if row["recommendation_subscription.status"] == status:
+            continue
+        if wanted is not None and rtype not in wanted:
+            continue
+        if rtype in ("UNKNOWN", "UNSPECIFIED"):
+            unsupported += 1
+            continue
+        op = client.get_type("MutateOperation")
+        sub = op.recommendation_subscription_operation.update
+        sub.resource_name = row["recommendation_subscription.resource_name"]
+        sub.status = client.enums.RecommendationSubscriptionStatusEnum[status]
+        mutations.update_mask(
+            client, op.recommendation_subscription_operation.update_mask, ["status"]
+        )
+        operations.append((op, f"auto-apply {rtype}"))
+        changed.append(rtype)
+    if operations:
+        mutations.mutate(client, customer_id, operations, validate_only)
+    return {
+        "status": status,
+        "changed": changed,
+        "unsupported_unknown_types": unsupported,
+        "validate_only": validate_only,
+    }
