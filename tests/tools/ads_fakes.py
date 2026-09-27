@@ -65,10 +65,16 @@ class MutateToolTestCase(unittest.TestCase):
         self.queries.append(query)
         return self.search_results.pop(0) if self.search_results else []
 
-    def _fake_mutate(self, customer_id, mutate_operations, validate_only):
-        """Returns a response with a result per operation, as the API does."""
+    def _fake_mutate(self, request):
+        """Returns a response with a result per operation, as the API does.
+
+        Mirrors the generated client: validate_only is only accepted on the
+        request message, not as a keyword argument.
+        """
+        customer_id = request.customer_id
+        mutate_operations = request.mutate_operations
         response = self.client.get_type("MutateGoogleAdsResponse")
-        if validate_only:
+        if request.validate_only:
             return response
         for index, operation in enumerate(mutate_operations):
             op_field = operation._pb.WhichOneof("operation")
@@ -85,7 +91,7 @@ class MutateToolTestCase(unittest.TestCase):
     def mutate_calls(self):
         """Returns the operations of each Mutate call as proto-plus messages."""
         return [
-            call.kwargs["mutate_operations"]
+            list(call.kwargs["request"].mutate_operations)
             for call in self.service.mutate.call_args_list
         ]
 

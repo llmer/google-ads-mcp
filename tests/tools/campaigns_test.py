@@ -105,12 +105,12 @@ class TestCreateSearchCampaign(MutateToolTestCase):
     def test_customer_id_is_cleaned(self):
         self._create()
         self.assertEqual(
-            self.service.mutate.call_args.kwargs["customer_id"], "1234567890"
+            self.service.mutate.call_args.kwargs["request"].customer_id, "1234567890"
         )
 
     def test_validate_only(self):
         result = self._create(validate_only=True)
-        self.assertTrue(self.service.mutate.call_args.kwargs["validate_only"])
+        self.assertTrue(self.service.mutate.call_args.kwargs["request"].validate_only)
         self.assertTrue(result["validate_only"])
 
     def test_manual_cpc_requires_max_cpc(self):
@@ -212,7 +212,7 @@ class TestCreatePmaxCampaign(MutateToolTestCase):
         ]
         for text in _HEADLINES + _DESCRIPTIONS:
             self.assertIn(text, inline_texts)
-        self.assertTrue(self.service.mutate.call_args.kwargs["validate_only"])
+        self.assertTrue(self.service.mutate.call_args.kwargs["request"].validate_only)
 
     def test_brand_guidelines_link_brand_assets_to_campaign(self):
         self._create(brand_guidelines_enabled=True)

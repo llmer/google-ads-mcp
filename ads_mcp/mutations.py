@@ -232,11 +232,13 @@ def mutate(
     labels = [label for _, label in operations]
     service = get_service(client, "GoogleAdsService")
     try:
-        response = service.mutate(
-            customer_id=customer_id,
-            mutate_operations=[op for op, _ in operations],
-            validate_only=validate_only,
-        )
+        # validate_only is not a flattened argument of the generated client's
+        # mutate(); it must travel on the request message.
+        request = client.get_type("MutateGoogleAdsRequest")
+        request.customer_id = customer_id
+        request.mutate_operations.extend(op for op, _ in operations)
+        request.validate_only = validate_only
+        response = service.mutate(request=request)
     except GoogleAdsException as ex:
         raise ToolError(format_google_ads_exception(ex, labels))
 
