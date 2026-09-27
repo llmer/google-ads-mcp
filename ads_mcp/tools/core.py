@@ -104,3 +104,61 @@ def list_accounts(include_client_accounts: bool = True) -> List[Dict[str, Any]]:
                 "directly_accessible": level == 0,
             }
     return list(accounts.values())
+
+
+@customers_mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True
+    )
+)
+def update_account_tracking(
+    customer_id: str | int,
+    final_url_suffix: str | None = None,
+    tracking_url_template: str | None = None,
+    auto_tagging_enabled: bool | None = None,
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Updates account-level click tracking: the final URL suffix, tracking template
+    and auto-tagging. Only the given fields change.
+
+    The final URL suffix is appended to every ad's landing page URL and
+    commonly carries UTM parameters with ValueTrack placeholders, e.g.
+    "utm_source=google&utm_medium=cpc&utm_campaign={campaignid}". Pass an
+    empty string to clear a field. Auto-tagging adds the gclid used for
+    conversion tracking and offline conversion uploads.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        final_url_suffix: Query string appended to landing page URLs, without "?".
+        tracking_url_template: Tracking template, e.g. "{lpurl}?src=ads".
+        auto_tagging_enabled: Whether to add the gclid to ad clicks.
+        validate_only: If true, validates the request without changing anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The fields that were changed.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    changes = {
+        "final_url_suffix": final_url_suffix,
+        "tracking_url_template": tracking_url_template,
+        "auto_tagging_enabled": auto_tagging_enabled,
+    }
+    changes = {k: v for k, v in changes.items() if v is not None}
+    if not changes:
+        raise ToolError("Nothing to update: give at least one field.")
+    if final_url_suffix and final_url_suffix.startswith("?"):
+        raise ToolError("final_url_suffix must not start with '?'.")
+    if tracking_url_template and "{lpurl}" not in tracking_url_template:
+        raise ToolError("tracking_url_template must contain {lpurl}.")
+
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    op = client.get_type("MutateOperation")
+    customer = op.customer_operation.update
+    customer.resource_name = f"customers/{customer_id}"
+    for field, value in changes.items():
+        setattr(customer, field, value)
+    mutations.update_mask(client, op.customer_operation.update_mask, list(changes))
+    mutations.mutate(client, customer_id, [(op, "account tracking")], validate_only)
+    return {"customer_id": customer_id, "changed": changes, "validate_only": validate_only}

@@ -1293,3 +1293,141 @@ def enable_campaign(
     return _set_campaign_status(
         customer_id, campaign_id, "ENABLED", validate_only, login_customer_id
     )
+
+
+# Device criterion IDs are fixed by Google Ads.
+_DEVICE_CRITERION_IDS = {"DESKTOP": 30000, "MOBILE": 30001, "TABLET": 30002}
+_OPT = Literal["OPTED_IN", "OPTED_OUT"]
+
+
+@campaigns_mcp.tool(annotations=_UPDATE)
+def update_campaign_settings(
+    customer_id: str | int,
+    campaign_id: str | int,
+    location_targeting: Literal["PRESENCE", "PRESENCE_OR_INTEREST"] | None = None,
+    device_bid_adjustments: Dict[str, float] | None = None,
+    text_asset_automation: _OPT | None = None,
+    final_url_expansion: _OPT | None = None,
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Updates campaign settings that are not about budget or targeting lists.
+
+    Only the given settings are changed. None of them can raise a budget.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        campaign_id: The campaign ID.
+        location_targeting: PRESENCE shows ads only to people in or regularly
+          in the targeted locations; PRESENCE_OR_INTEREST (Google's default)
+          also includes people interested in them.
+        device_bid_adjustments: Percent bid adjustments by device, e.g.
+          {"DESKTOP": -50, "TABLET": -30, "MOBILE": 0}. -100 stops showing
+          ads on that device. Range -100 to +100. Manual CPC and enhanced
+          bidding use them; most Smart Bidding strategies ignore them.
+        text_asset_automation: OPTED_OUT stops Google from generating
+          headlines and descriptions from the landing page (Search, PMax).
+        final_url_expansion: OPTED_OUT stops Google from sending clicks to
+          other pages of the site than the ad's final URL.
+        validate_only: If true, validates the request without changing anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The settings that were changed.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    campaign_id = mutations.parse_id(campaign_id, "campaign_id")
+    if not any(
+        v is not None
+        for v in (
+            location_targeting,
+            device_bid_adjustments,
+            text_asset_automation,
+            final_url_expansion,
+        )
+    ):
+        raise ToolError("Nothing to update: give at least one setting.")
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    campaign_rn = _campaign_rn(customer_id, campaign_id)
+    operations: List[Tuple[Any, str]] = []
+    changed: Dict[str, Any] = {}
+
+    paths: List[str] = []
+    op = client.get_type("MutateOperation")
+    campaign = op.campaign_operation.update
+    campaign.resource_name = campaign_rn
+    if location_targeting is not None:
+        campaign.geo_target_type_setting.positive_geo_target_type = (
+            client.enums.PositiveGeoTargetTypeEnum[location_targeting]
+        )
+        paths.append("geo_target_type_setting.positive_geo_target_type")
+        changed["location_targeting"] = location_targeting
+    automation = [
+        ("TEXT_ASSET_AUTOMATION", text_asset_automation),
+        ("FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION", final_url_expansion),
+    ]
+    if any(status is not None for _, status in automation):
+        for automation_type, status in automation:
+            if status is None:
+                continue
+            setting = client.get_type("Campaign").AssetAutomationSetting()
+            setting.asset_automation_type = client.enums.AssetAutomationTypeEnum[
+                automation_type
+            ]
+            setting.asset_automation_status = client.enums.AssetAutomationStatusEnum[
+                status
+            ]
+            campaign.asset_automation_settings.append(setting)
+        paths.append("asset_automation_settings")
+        changed["text_asset_automation"] = text_asset_automation
+        changed["final_url_expansion"] = final_url_expansion
+    if paths:
+        mutations.update_mask(client, op.campaign_operation.update_mask, paths)
+        operations.append((op, f"campaign {campaign_id} settings"))
+
+    if device_bid_adjustments:
+        adjustments = {}
+        for device, percent in device_bid_adjustments.items():
+            key = device.upper()
+            if key not in _DEVICE_CRITERION_IDS:
+                raise ToolError(
+                    f"Unknown device {device!r}; use DESKTOP, MOBILE or TABLET."
+                )
+            if not -100 <= percent <= 100:
+                raise ToolError(
+                    f"Bid adjustment for {key} must be between -100 and +100 percent."
+                )
+            adjustments[key] = percent
+        rows = mutations.search(
+            client,
+            customer_id,
+            "SELECT campaign_criterion.resource_name, campaign_criterion.device.type "
+            f"FROM campaign_criterion WHERE campaign.id = {campaign_id} "
+            "AND campaign_criterion.type = 'DEVICE'",
+        )
+        existing = {
+            row["campaign_criterion.device.type"]: row[
+                "campaign_criterion.resource_name"
+            ]
+            for row in rows
+        }
+        for device, percent in adjustments.items():
+            op = client.get_type("MutateOperation")
+            modifier = round(1 + percent / 100, 2)
+            if device in existing:
+                criterion = op.campaign_criterion_operation.update
+                criterion.resource_name = existing[device]
+                criterion.bid_modifier = modifier
+                mutations.update_mask(
+                    client, op.campaign_criterion_operation.update_mask, ["bid_modifier"]
+                )
+            else:
+                criterion = op.campaign_criterion_operation.create
+                criterion.campaign = campaign_rn
+                criterion.device.type_ = client.enums.DeviceEnum[device]
+                criterion.bid_modifier = modifier
+            operations.append((op, f"device {device} bid adjustment"))
+        changed["device_bid_adjustments"] = adjustments
+
+    mutations.mutate(client, customer_id, operations, validate_only)
+    return {"campaign_id": campaign_id, "changed": changed, "validate_only": validate_only}

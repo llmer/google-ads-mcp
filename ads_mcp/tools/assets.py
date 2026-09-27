@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Literal, Tuple
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import BaseModel, Field
 
 import ads_mcp.mutations as mutations
 import ads_mcp.utils as utils
@@ -856,3 +857,259 @@ def create_asset_group(
         "asset_group_id": mutations.parse_id(asset_group_rn),
         "created": results,
     }
+
+
+# Search asset ("extension") limits, in characters.
+_SITELINK_TEXT_MAX = 25
+_SITELINK_DESCRIPTION_MAX = 35
+_CALLOUT_MAX = 25
+_SNIPPET_VALUE_MAX = 25
+_PRICE_TEXT_MAX = 25
+_BUSINESS_NAME_MAX = 25
+_SNIPPET_HEADERS = {
+    "Amenities", "Brands", "Courses", "Degree programs", "Destinations",
+    "Featured hotels", "Insurance coverage", "Models", "Neighborhoods",
+    "Service catalog", "Shows", "Styles", "Types",
+}
+
+
+class Sitelink(BaseModel):
+    """A sitelink: an extra link under the ad."""
+
+    text: str = Field(description="Link text, max 25 characters.")
+    final_url: str = Field(description="The link's landing page.")
+    description1: str | None = Field(
+        default=None, description="First description line, max 35 characters."
+    )
+    description2: str | None = Field(
+        default=None,
+        description="Second description line, max 35 characters. Give both lines or neither.",
+    )
+
+
+class StructuredSnippet(BaseModel):
+    """A structured snippet: a header and a list of values."""
+
+    header: str = Field(description="One of Google's headers, e.g. Styles, Types, Brands.")
+    values: List[str] = Field(description="3-10 values, max 25 characters each.")
+
+
+class PriceItem(BaseModel):
+    """One price offering."""
+
+    header: str = Field(description="Max 25 characters.")
+    description: str = Field(description="Max 25 characters.")
+    price: float = Field(description="Price in the currency of the price asset.")
+    final_url: str = Field(description="Landing page for this offering.")
+    unit: Literal["PER_HOUR", "PER_DAY", "PER_WEEK", "PER_MONTH", "PER_YEAR", "PER_NIGHT"] | None = None
+
+
+class PriceAsset(BaseModel):
+    """A price asset: 3-8 offerings of one type."""
+
+    type: Literal[
+        "BRANDS", "EVENTS", "LOCATIONS", "NEIGHBORHOODS", "PRODUCT_CATEGORIES",
+        "PRODUCT_TIERS", "SERVICES", "SERVICE_CATEGORIES", "SERVICE_TIERS",
+    ]
+    currency_code: str = Field(description='ISO 4217, e.g. "USD".')
+    language_code: str = Field(default="en", description='e.g. "en".')
+    qualifier: Literal["FROM", "UP_TO", "AVERAGE"] | None = None
+    items: List[PriceItem]
+
+
+def _check_len(label: str, text: str, limit: int) -> None:
+    if not text or len(text) > limit:
+        raise ToolError(f"{label} must be 1-{limit} characters: {text!r} ({len(text or '')}).")
+
+
+@assets_mcp.tool(annotations=_CREATE)
+def add_campaign_assets(
+    customer_id: str | int,
+    campaign_ids: List[str | int],
+    sitelinks: List[Sitelink] | None = None,
+    callouts: List[str] | None = None,
+    structured_snippet: StructuredSnippet | None = None,
+    price: PriceAsset | None = None,
+    business_name: str | None = None,
+    business_logo_asset_id: str | int | None = None,
+    image_asset_ids: List[str | int] | None = None,
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Adds Search assets (sitelinks, callouts, a structured snippet, a price asset,
+    business name, business logo and images) to one or more campaigns.
+
+    Assets are created once and linked to every listed campaign, in one atomic
+    request. An asset whose text (sitelink text, callout text, snippet header,
+    price type, business name) is already linked to a campaign is skipped for
+    that campaign, so the tool can be re-run safely.
+
+    Upload the logo and images first with upload_logo and upload_image and
+    pass their asset IDs; the logo must be square (1:1), images landscape
+    (1.91:1) or square.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        campaign_ids: Campaigns to add the assets to.
+        sitelinks: Sitelinks (Google shows up to 4-6; add at least 2).
+        callouts: Callout texts, max 25 characters each.
+        structured_snippet: A header and 3-10 values.
+        price: A price asset with 3-8 items.
+        business_name: The advertiser name shown with the ad, max 25 characters.
+        business_logo_asset_id: ID of a square image asset to use as the business logo.
+        image_asset_ids: IDs of image assets to show with the ad.
+        validate_only: If true, validates the request without changing anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        Per campaign, the assets linked and the ones skipped as duplicates.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    if not campaign_ids:
+        raise ToolError("Give at least one campaign_id.")
+    campaign_ids = [mutations.parse_id(c, "campaign_id") for c in campaign_ids]
+    sitelinks = sitelinks or []
+    callouts = callouts or []
+    image_asset_ids = [mutations.parse_id(i, "image_asset_id") for i in (image_asset_ids or [])]
+
+    for link in sitelinks:
+        _check_len("Sitelink text", link.text, _SITELINK_TEXT_MAX)
+        if bool(link.description1) != bool(link.description2):
+            raise ToolError(f"Sitelink {link.text!r}: give both description lines or neither.")
+        for line in (link.description1, link.description2):
+            if line:
+                _check_len("Sitelink description", line, _SITELINK_DESCRIPTION_MAX)
+    for text in callouts:
+        _check_len("Callout", text, _CALLOUT_MAX)
+    if structured_snippet:
+        if structured_snippet.header not in _SNIPPET_HEADERS:
+            raise ToolError(
+                f"Structured snippet header must be one of: {', '.join(sorted(_SNIPPET_HEADERS))}."
+            )
+        if not 3 <= len(structured_snippet.values) <= 10:
+            raise ToolError("A structured snippet needs 3-10 values.")
+        for value in structured_snippet.values:
+            _check_len("Snippet value", value, _SNIPPET_VALUE_MAX)
+    if price:
+        if not 3 <= len(price.items) <= 8:
+            raise ToolError("A price asset needs 3-8 items.")
+        for item in price.items:
+            _check_len("Price header", item.header, _PRICE_TEXT_MAX)
+            _check_len("Price description", item.description, _PRICE_TEXT_MAX)
+            if item.price < 0:
+                raise ToolError("Prices cannot be negative.")
+    if business_name:
+        _check_len("Business name", business_name, _BUSINESS_NAME_MAX)
+
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    field_types = client.enums.AssetFieldTypeEnum
+
+    # What each campaign already has, to skip duplicates.
+    rows = mutations.search(
+        client,
+        customer_id,
+        "SELECT campaign.id, campaign_asset.field_type, asset.id, "
+        "asset.sitelink_asset.link_text, asset.callout_asset.callout_text, "
+        "asset.structured_snippet_asset.header, asset.price_asset.type, "
+        "asset.text_asset.text FROM campaign_asset "
+        f"WHERE campaign.id IN ({', '.join(campaign_ids)}) "
+        "AND campaign_asset.status != 'REMOVED'",
+    )
+    existing: Dict[str, set] = {c: set() for c in campaign_ids}
+    for row in rows:
+        field = row.get("campaign_asset.field_type")
+        key = {
+            "SITELINK": row.get("asset.sitelink_asset.link_text"),
+            "CALLOUT": row.get("asset.callout_asset.callout_text"),
+            "STRUCTURED_SNIPPET": row.get("asset.structured_snippet_asset.header"),
+            "PRICE": row.get("asset.price_asset.type"),
+            "BUSINESS_NAME": row.get("asset.text_asset.text"),
+            "BUSINESS_LOGO": str(row.get("asset.id")),
+            "AD_IMAGE": str(row.get("asset.id")),
+        }.get(field)
+        if key is not None:
+            existing[str(row["campaign.id"])].add((field, key))
+
+    # (field type, key, builder or existing asset resource name)
+    wanted: List[Tuple[str, str, Any]] = []
+    for link in sitelinks:
+        def build(asset, link=link):
+            asset.final_urls.append(link.final_url)
+            asset.sitelink_asset.link_text = link.text
+            if link.description1:
+                asset.sitelink_asset.description1 = link.description1
+                asset.sitelink_asset.description2 = link.description2
+        wanted.append(("SITELINK", link.text, build))
+    for text in callouts:
+        def build(asset, text=text):
+            asset.callout_asset.callout_text = text
+        wanted.append(("CALLOUT", text, build))
+    if structured_snippet:
+        def build(asset, snippet=structured_snippet):
+            asset.structured_snippet_asset.header = snippet.header
+            asset.structured_snippet_asset.values.extend(snippet.values)
+        wanted.append(("STRUCTURED_SNIPPET", structured_snippet.header, build))
+    if price:
+        def build(asset, price=price):
+            p = asset.price_asset
+            p.type_ = client.enums.PriceExtensionTypeEnum[price.type]
+            p.language_code = price.language_code
+            if price.qualifier:
+                p.price_qualifier = client.enums.PriceExtensionPriceQualifierEnum[
+                    price.qualifier
+                ]
+            for item in price.items:
+                offering = client.get_type("PriceOffering")
+                offering.header = item.header
+                offering.description = item.description
+                offering.final_url = item.final_url
+                offering.price.currency_code = price.currency_code
+                offering.price.amount_micros = mutations.to_micros(item.price)
+                if item.unit:
+                    offering.unit = client.enums.PriceExtensionPriceUnitEnum[item.unit]
+                p.price_offerings.append(offering)
+        wanted.append(("PRICE", price.type, build))
+    if business_name:
+        def build(asset, name=business_name):
+            asset.text_asset.text = name
+        wanted.append(("BUSINESS_NAME", business_name, build))
+    if business_logo_asset_id is not None:
+        logo_id = mutations.parse_id(business_logo_asset_id, "business_logo_asset_id")
+        wanted.append(("BUSINESS_LOGO", logo_id, mutations.resource_name(customer_id, "assets", logo_id)))
+    for image_id in image_asset_ids:
+        wanted.append(("AD_IMAGE", image_id, mutations.resource_name(customer_id, "assets", image_id)))
+    if not wanted:
+        raise ToolError("Nothing to add.")
+
+    operations = []
+    summary = {c: {"linked": [], "skipped": []} for c in campaign_ids}
+    temp_id = 0
+    for field, key, source in wanted:
+        needed_by = [c for c in campaign_ids if (field, key) not in existing[c]]
+        for c in campaign_ids:
+            if c not in needed_by:
+                summary[c]["skipped"].append(f"{field}: {key}")
+        if not needed_by:
+            continue
+        if callable(source):
+            temp_id -= 1
+            asset_rn = f"customers/{customer_id}/assets/{temp_id}"  # temporary ID
+            op = client.get_type("MutateOperation")
+            asset = op.asset_operation.create
+            asset.resource_name = asset_rn
+            source(asset)
+            operations.append((op, f"{field} asset {key!r}"))
+        else:
+            asset_rn = source
+        for c in needed_by:
+            op = client.get_type("MutateOperation")
+            link = op.campaign_asset_operation.create
+            link.campaign = mutations.resource_name(customer_id, "campaigns", c)
+            link.asset = asset_rn
+            link.field_type = field_types[field]
+            operations.append((op, f"link {field} {key!r} to campaign {c}"))
+            summary[c]["linked"].append(f"{field}: {key}")
+
+    if operations:
+        mutations.mutate(client, customer_id, operations, validate_only)
+    return {"campaigns": summary, "validate_only": validate_only}

@@ -26,6 +26,9 @@ to provide several
   by the user authenticating the call.
 - `list_accounts`: Lists accessible accounts, including client accounts of
   manager accounts, with their name, currency and time zone.
+- `update_account_tracking`: Sets the account's final URL suffix (e.g. UTM
+  parameters with ValueTrack placeholders), tracking template and
+  auto-tagging. Enabled with the `customers` namespace.
 
 #### Managing campaigns
 
@@ -50,12 +53,18 @@ monetary amounts are given in the account currency (e.g. `25.5`), not micros.
   - `create_app_campaign`: App campaign promoting an Android or iOS app,
     optimizing for installs, in-app actions or in-app value.
   - `update_budget`, `pause_campaign`, `enable_campaign`.
+  - `update_campaign_settings`: Location targeting mode (presence vs.
+    presence or interest), device bid adjustments, and opting out of
+    automatically created text assets and final URL expansion.
 - `assets` namespace:
   - `list_assets`, `get_asset_group`: Existing assets, and the assets and
     signals of a Performance Max asset group.
   - `upload_image`, `upload_logo`: Upload images from a URL, base64 data or a
     local file, and report which image formats they fit.
   - `create_text_assets`, `create_youtube_video_assets`.
+  - `add_campaign_assets`: Sitelinks, callouts, a structured snippet, a price
+    asset, business name, business logo and images for Search campaigns,
+    linked to one or more campaigns; re-runs skip assets already linked.
   - `create_asset_group`: Add an asset group to a Performance Max campaign.
 - `targeting` namespace:
   - `find_geo_targets`: Look up location IDs by name.
@@ -68,6 +77,9 @@ monetary amounts are given in the account currency (e.g. `25.5`), not micros.
     `update_conversion_action`: Manage what counts as a conversion. Website
     conversion actions return the tag snippets to install.
   - `upload_click_conversions`: Report conversions recorded by your backend.
+  - `set_campaign_conversion_goals`: Choose which conversion goals
+    (category and origin) a campaign optimizes for, overriding the account
+    defaults, e.g. when one account runs several businesses or apps.
 
 Mobile app conversions (installs, in-app events) are imported by linking
 Firebase, Google Analytics 4, Google Play or a third-party app analytics

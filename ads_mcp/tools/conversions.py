@@ -481,3 +481,87 @@ def _partial_failure_errors(client, status) -> List[Dict[str, Any]]:
             )
             errors.append({"index": index, "message": error.message})
     return errors
+
+
+@conversions_mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True
+    )
+)
+def set_campaign_conversion_goals(
+    customer_id: str | int,
+    campaign_id: str | int,
+    biddable_goals: List[str],
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Chooses which conversion goals a campaign optimizes for and reports as Conversions.
+
+    Each goal is a conversion category and origin, written "CATEGORY:ORIGIN",
+    e.g. "PURCHASE:WEBSITE" or "DOWNLOAD:APP". Listed goals become biddable
+    for the campaign; every other goal the campaign has is set to not
+    biddable. This is the campaign-level override of the account-default
+    goals, useful when one account runs several businesses or apps.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        campaign_id: The campaign ID.
+        biddable_goals: Goals to optimize for, as "CATEGORY:ORIGIN".
+        validate_only: If true, validates the request without changing anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The goals set to biddable and not biddable.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    campaign_id = mutations.parse_id(campaign_id, "campaign_id")
+    if not biddable_goals:
+        raise ToolError("Give at least one biddable goal, e.g. PURCHASE:WEBSITE.")
+    wanted = set()
+    for goal in biddable_goals:
+        category, sep, origin = goal.upper().partition(":")
+        if not sep or not category or not origin:
+            raise ToolError(f"Goal {goal!r} must be written CATEGORY:ORIGIN.")
+        wanted.add((category, origin))
+
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    rows = mutations.search(
+        client,
+        customer_id,
+        "SELECT campaign_conversion_goal.resource_name, "
+        "campaign_conversion_goal.category, campaign_conversion_goal.origin, "
+        "campaign_conversion_goal.biddable FROM campaign_conversion_goal "
+        f"WHERE campaign.id = {campaign_id}",
+    )
+    available = {
+        (row["campaign_conversion_goal.category"], row["campaign_conversion_goal.origin"]): row
+        for row in rows
+    }
+    missing = wanted - set(available)
+    if missing:
+        raise ToolError(
+            "The campaign has no goal "
+            + ", ".join(f"{c}:{o}" for c, o in sorted(missing))
+            + ". Goals exist once a conversion action of that category and "
+            "origin exists. Available: "
+            + ", ".join(f"{c}:{o}" for c, o in sorted(available))
+        )
+
+    operations = []
+    result = {"biddable": [], "not_biddable": []}
+    for key, row in sorted(available.items()):
+        biddable = key in wanted
+        result["biddable" if biddable else "not_biddable"].append(":".join(key))
+        if bool(row["campaign_conversion_goal.biddable"]) == biddable:
+            continue
+        op = client.get_type("MutateOperation")
+        goal = op.campaign_conversion_goal_operation.update
+        goal.resource_name = row["campaign_conversion_goal.resource_name"]
+        goal.biddable = biddable
+        mutations.update_mask(
+            client, op.campaign_conversion_goal_operation.update_mask, ["biddable"]
+        )
+        operations.append((op, f"goal {':'.join(key)}"))
+    if operations:
+        mutations.mutate(client, customer_id, operations, validate_only)
+    return {"campaign_id": campaign_id, **result, "validate_only": validate_only}
