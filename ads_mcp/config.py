@@ -28,7 +28,15 @@ DEFAULT_CONFIG_FILE = "tools_config.yaml"
 CONFIG_PATH_ENV_VAR = "GOOGLE_ADS_MCP_TOOLS_CONFIG"
 
 # Default categories that are supported by the server
-ALL_CATEGORIES = ["customers", "search", "metadata"]
+ALL_CATEGORIES = [
+    "customers",
+    "search",
+    "metadata",
+    "campaigns",
+    "assets",
+    "targeting",
+    "conversions",
+]
 
 
 class ToolsConfig:
@@ -107,6 +115,14 @@ class ToolsConfig:
             raise ValueError(
                 f"Failed to parse configuration file '{resolved}': {e}"
             ) from e
+
+    @property
+    def guardrails(self) -> Dict[str, Any]:
+        """The spend guardrails section (see ads_mcp/guardrails.py)."""
+        guardrails = self._config.get("guardrails") or {}
+        if not isinstance(guardrails, dict):
+            raise ValueError("'guardrails' must be a YAML mapping.")
+        return guardrails
 
     def is_namespace_enabled(self, category: str) -> bool:
         """Determines if a tool category/namespace is enabled."""

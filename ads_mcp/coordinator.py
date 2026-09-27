@@ -32,6 +32,27 @@ _CLIENT_SECRET = os.environ.get("GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET")
 _BASE_URL = os.environ.get("GOOGLE_ADS_MCP_BASE_URL", "http://localhost:8080")
 _JWT_SIGNING_KEY = os.environ.get("GOOGLE_ADS_MCP_JWT_SIGNING_KEY")
 
+# Guidance sent to MCP clients on initialization.
+_INSTRUCTIONS = """\
+Tools for reading and managing Google Ads accounts.
+
+Always read the current state before changing it:
+- Use list_accounts to find the account, then list_campaigns and
+  get_spend_overview to see what is running and spending.
+- Before changing a campaign, read it with get_campaign (and get_asset_group
+  for Performance Max asset groups).
+- Before uploading assets or creating conversion actions, check for existing
+  ones with list_assets and list_conversion_actions.
+
+Changes that affect spend:
+- New campaigns are created paused. Confirm with the user before calling
+  enable_campaign or raising a budget, stating the amount in the account
+  currency.
+- Use validate_only=true to check a change without applying it.
+- The server enforces spend guardrails; if a change is refused, report the
+  limit to the user rather than working around it.
+"""
+
 if _CLIENT_ID and _CLIENT_SECRET:
     client_storage = create_client_storage()
     provider_kwargs: dict[str, Any] = {
@@ -51,9 +72,9 @@ if _CLIENT_ID and _CLIENT_SECRET:
         provider_kwargs["client_storage"] = client_storage
 
     auth = GoogleProvider(**provider_kwargs)
-    mcp = FastMCP("Google Ads Server", auth=auth)
+    mcp = FastMCP("Google Ads Server", instructions=_INSTRUCTIONS, auth=auth)
 else:
-    mcp = FastMCP("Google Ads Server")
+    mcp = FastMCP("Google Ads Server", instructions=_INSTRUCTIONS)
 
 
 def ensure_subscriptions_listen(server: FastMCP) -> bool:

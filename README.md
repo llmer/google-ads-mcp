@@ -17,6 +17,57 @@ to provide several
 - `get_resource_metadata`: Retrieves metadata about a Google Ads API resource type, for example "campaign". This is useful to understand the structure of the data and what fields are available for querying.
 - `list_accessible_customers`: Returns ids of customers directly accessible
   by the user authenticating the call.
+- `list_accounts`: Lists accessible accounts, including client accounts of
+  manager accounts, with their name, currency and time zone.
+
+#### Managing campaigns
+
+The following tools create and change entities in your Google Ads accounts.
+New campaigns are always created **paused**: nothing spends money until a
+campaign is enabled with `enable_campaign`. The server tells agents to read
+the current state before changing it, and enforces configurable
+[spend guardrails](#spend-guardrails). Every mutating tool accepts
+`validate_only: true` to check a request without changing anything, and
+monetary amounts are given in the account currency (e.g. `25.5`), not micros.
+
+- `campaigns` namespace:
+  - `list_campaigns`: Campaigns with status, bidding, daily budget and
+    performance over a date range.
+  - `get_campaign`: Status, budget, bidding, targeting, asset/ad groups and
+    last-30-day performance of a campaign.
+  - `get_spend_overview`: Total daily budget of enabled campaigns, spend today
+    and this month, billing spending limits, and guardrail headroom.
+  - `create_search_campaign`: Search campaign with budget, targeting, an ad
+    group, keywords and a responsive search ad, for websites and web apps.
+  - `create_pmax_campaign`: Performance Max campaign with its first asset group.
+  - `create_app_campaign`: App campaign promoting an Android or iOS app,
+    optimizing for installs, in-app actions or in-app value.
+  - `update_budget`, `pause_campaign`, `enable_campaign`.
+- `assets` namespace:
+  - `list_assets`, `get_asset_group`: Existing assets, and the assets and
+    signals of a Performance Max asset group.
+  - `upload_image`, `upload_logo`: Upload images from a URL, base64 data or a
+    local file, and report which image formats they fit.
+  - `create_text_assets`, `create_youtube_video_assets`.
+  - `create_asset_group`: Add an asset group to a Performance Max campaign.
+- `targeting` namespace:
+  - `find_geo_targets`: Look up location IDs by name.
+  - `list_audiences`: Audiences usable as Performance Max signals.
+  - `set_geo_targets`, `set_language_targets`, `set_negative_keywords`,
+    `set_audience_signals`: Add, remove or replace targeting.
+- `conversions` namespace:
+  - `list_conversion_actions`, `get_conversion_action`,
+    `create_conversion_action`,
+    `update_conversion_action`: Manage what counts as a conversion. Website
+    conversion actions return the tag snippets to install.
+  - `upload_click_conversions`: Report conversions recorded by your backend.
+
+Mobile app conversions (installs, in-app events) are imported by linking
+Firebase, Google Analytics 4, Google Play or a third-party app analytics
+provider in the Google Ads UI; they then appear in `list_conversion_actions`.
+
+To run a read-only server, disable the `campaigns`, `assets`, `targeting` and
+`conversions` namespaces in `tools_config.yaml` (see below).
 
 ### Configuring and Namespacing Tools
 
@@ -48,6 +99,35 @@ namespaces:
 ```
 
 
+### Agent skill
+
+[`skills/google-ads`](skills/google-ads/SKILL.md) is an agent skill that
+teaches Claude how to use these tools well: read the account before changing
+it, pick the right campaign type for web vs. mobile apps, set up conversion
+tracking, meet creative requirements and respect spend guardrails. See
+[Install locally with Claude Code](#install-locally-with-claude-code) to set it
+up alongside the server.
+
+### Spend guardrails
+
+Set limits in the `guardrails` section of `tools_config.yaml`, in each
+account's currency. They are checked against live account data before
+`create_*_campaign`, `update_budget` and `enable_campaign` send any change, and
+cannot be overridden through tool parameters. Pausing and lowering budgets is
+never blocked.
+
+```yaml
+guardrails:
+  max_daily_budget: 100             # per campaign
+  max_total_daily_budget: 500       # all enabled campaigns in an account
+  max_budget_increase_percent: 50   # per update_budget call
+  accounts:                         # per-account overrides
+    "1234567890":
+      max_total_daily_budget: 2000
+```
+
+The configuration is re-read on every call, so edits apply without a restart.
+
 ### Resources available
 
 - `discovery-document`: Retrieve the Google Ads API discovery document. Provides the discovery document for the latest version of the Google Ads API, which describes the API surface, including resources, methods, and schemas. Host LLMs should access this resource to understand the structure of the Google Ads API and discover available features.
@@ -58,6 +138,8 @@ namespaces:
 ## Notes
 
 1.  The MCP Server will expose your data to the Agent or LLM that you connect to it.
+1.  Unless you disable them, the MCP Server lets the Agent or LLM create and
+    change campaigns, which can spend money once enabled.
 1.  If you have technical issues, please use the [GitHub issue tracker](https://github.com/googleads/google-ads-mcp/issues).
 1.  To help us collect usage data, you will notice an extra header has been added to your API calls: this data is used to improve the product.
 
@@ -70,6 +152,11 @@ Setup involves the following steps:
 1.  Enable APIs in your project
 1.  Configure Credentials.
 1.  Configure your MCP client.
+
+To run the server from a local checkout of this repository (for example to
+use tools that are not yet released) and install the agent skill, do the
+first four steps, then follow
+[Install locally with Claude Code](#install-locally-with-claude-code).
 
 ### Configure Python
 
@@ -376,9 +463,120 @@ The final file will look like this:
   }
   ```
 
-#### Other MCP clients (Claude Code, Cursor, VS Code, etc.)
+#### Install locally with Claude Code
 
-The `mcpServers` block format is the same across all MCP clients. Add the configuration shown above to the appropriate settings file for your client (e.g., `~/.claude/settings.json` for Claude Code, `.cursor/mcp.json` for Cursor, `.vscode/mcp.json` for VS Code with Copilot).
+These steps run the MCP server from a local checkout of this repository and
+install the [agent skill](skills/google-ads/SKILL.md), so Claude Code can
+use them in any project. They assume you have completed the credential steps
+above (Application Default Credentials or a `google-ads.yaml` file) and have a
+developer token.
+
+1.  **Install [uv](https://docs.astral.sh/uv/getting-started/installation/)
+    and clone the repository.** Use an absolute path you will keep; the
+    commands below refer to it as `$GOOGLE_ADS_MCP_DIR`.
+
+    ```shell
+    git clone https://github.com/googleads/google-ads-mcp.git ~/src/google-ads-mcp
+    export GOOGLE_ADS_MCP_DIR=~/src/google-ads-mcp
+    cd "$GOOGLE_ADS_MCP_DIR" && uv sync
+    ```
+
+    `uv sync` creates a `.venv` in the checkout with the server installed in
+    editable mode, so local code changes apply the next time the server starts.
+
+1.  **Create your own tools configuration** outside the checkout, so that
+    `git pull` never overwrites it, and set your
+    [spend guardrails](#spend-guardrails):
+
+    ```shell
+    mkdir -p ~/.config/google-ads-mcp
+    cp "$GOOGLE_ADS_MCP_DIR/ads_mcp/tools_config.yaml" ~/.config/google-ads-mcp/
+    # Edit ~/.config/google-ads-mcp/tools_config.yaml: set the guardrails, or
+    # disable the campaigns/assets/targeting/conversions namespaces for a
+    # read-only server.
+    ```
+
+1.  **Register the MCP server with Claude Code.** To make it available in all
+    your projects (user scope):
+
+    ```shell
+    claude mcp add google-ads --scope user \
+      -e GOOGLE_APPLICATION_CREDENTIALS=PATH_TO_CREDENTIALS_JSON \
+      -e GOOGLE_PROJECT_ID=YOUR_PROJECT_ID \
+      -e GOOGLE_ADS_DEVELOPER_TOKEN=YOUR_DEVELOPER_TOKEN \
+      -e GOOGLE_ADS_MCP_TOOLS_CONFIG="$HOME/.config/google-ads-mcp/tools_config.yaml" \
+      -- uv --directory "$GOOGLE_ADS_MCP_DIR" run google-ads-mcp
+    ```
+
+    Add `-e GOOGLE_ADS_LOGIN_CUSTOMER_ID=YOUR_MANAGER_CUSTOMER_ID` if you
+    access accounts through a manager account. Omit
+    `GOOGLE_APPLICATION_CREDENTIALS` if you use `gcloud auth
+    application-default login`, which stores credentials in the default
+    location.
+
+    To share the setup with a team through a project's repository instead, add
+    a `.mcp.json` file at the project root. Claude Code expands `${VAR}` from
+    each user's environment, so no secrets are committed:
+
+    ```json
+    {
+      "mcpServers": {
+        "google-ads": {
+          "command": "uv",
+          "args": [
+            "--directory",
+            "${GOOGLE_ADS_MCP_DIR}",
+            "run",
+            "google-ads-mcp"
+          ],
+          "env": {
+            "GOOGLE_APPLICATION_CREDENTIALS": "${GOOGLE_APPLICATION_CREDENTIALS}",
+            "GOOGLE_PROJECT_ID": "${GOOGLE_PROJECT_ID}",
+            "GOOGLE_ADS_DEVELOPER_TOKEN": "${GOOGLE_ADS_DEVELOPER_TOKEN}",
+            "GOOGLE_ADS_MCP_TOOLS_CONFIG": "${GOOGLE_ADS_MCP_TOOLS_CONFIG}"
+          }
+        }
+      }
+    }
+    ```
+
+1.  **Install the agent skill.** For all projects, link it into your user
+    skills directory; for one project, link it into that project's
+    `.claude/skills` directory instead (commit a copy rather than a link if
+    teammates should get it too):
+
+    ```shell
+    # All projects
+    mkdir -p ~/.claude/skills
+    ln -s "$GOOGLE_ADS_MCP_DIR/skills/google-ads" ~/.claude/skills/google-ads
+
+    # One project (run from the project root)
+    mkdir -p .claude/skills
+    cp -r "$GOOGLE_ADS_MCP_DIR/skills/google-ads" .claude/skills/
+    ```
+
+    A link picks up skill updates with `git pull`; a copy has to be refreshed.
+
+1.  **Check the setup.** Run `claude mcp list` and confirm `google-ads` is
+    connected, then start Claude Code: `/mcp` lists the server and its tools,
+    and `/google-ads` invokes the skill directly (it is also used
+    automatically for Google Ads requests). Try a read-only request first,
+    such as *"List my Google Ads accounts and show the spend overview for the
+    main one."*
+
+To update, run `git pull` (and `uv sync` if dependencies changed) in the
+checkout, then restart Claude Code.
+
+#### Other MCP clients (Cursor, VS Code, etc.)
+
+The `mcpServers` block format is the same across all MCP clients. Add the configuration shown above to the appropriate settings file for your client (e.g., `.mcp.json` for Claude Code, `.cursor/mcp.json` for Cursor, `.vscode/mcp.json` for VS Code with Copilot).
+
+To run a local checkout instead of the published version, replace `command`
+and `args` with `"command": "uv"` and
+`"args": ["--directory", "/absolute/path/to/google-ads-mcp", "run", "google-ads-mcp"]`,
+and set `GOOGLE_ADS_MCP_TOOLS_CONFIG` in `env` to your tools configuration.
+The agent skill is specific to Claude Code, but `skills/google-ads/SKILL.md`
+is plain Markdown that other agents can be pointed to as instructions.
 
 ## Deployment to Google Cloud Platform
 

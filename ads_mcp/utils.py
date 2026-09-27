@@ -44,8 +44,8 @@ logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # OAuth scope for the Google Ads API. Google Ads does not publish a separate
-# read-only scope; access is restricted to read methods by the tools this
-# server exposes (see ads_mcp/tools/).
+# read-only scope; to run a read-only server, disable the namespaces of
+# mutating tools in tools_config.yaml.
 _ADS_SCOPE = "https://www.googleapis.com/auth/adwords"
 
 

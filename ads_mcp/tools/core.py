@@ -14,10 +14,12 @@
 
 """Tools for exposing simple, core API methods to the MCP server."""
 
-from typing import List
+from typing import Any, Dict, List
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
+import ads_mcp.mutations as mutations
 import ads_mcp.utils as utils
 
 from google.ads.googleads.v25.services.types.customer_service import (
@@ -46,3 +48,59 @@ def list_accessible_customers() -> List[str]:
         cust_rn.removeprefix("customers/")
         for cust_rn in accessible_customers.resource_names
     ]
+
+
+@customers_mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+def list_accounts(include_client_accounts: bool = True) -> List[Dict[str, Any]]:
+    """Lists the Google Ads accounts the user can access, with their name, currency, time zone
+    and whether they are manager (MCC) accounts.
+
+    Client accounts directly under an accessible manager account are included
+    too. To work with such a client account, pass the returned
+    `login_customer_id` along with its `customer_id` to other tools.
+
+    Args:
+        include_client_accounts: Whether to include client accounts of manager accounts.
+
+    Returns:
+        One entry per account. Accounts that cannot be read (e.g. cancelled
+        ones) are returned with an `error`.
+    """
+    accounts: Dict[str, Dict[str, Any]] = {}
+    for root_id in list_accessible_customers():
+        client = utils.get_googleads_client(login_customer_id=root_id)
+        max_level = 1 if include_client_accounts else 0
+        try:
+            rows = mutations.search(
+                client,
+                root_id,
+                "SELECT customer_client.id, customer_client.descriptive_name, "
+                "customer_client.currency_code, customer_client.time_zone, "
+                "customer_client.manager, customer_client.test_account, "
+                "customer_client.status, customer_client.level "
+                "FROM customer_client "
+                f"WHERE customer_client.level <= {max_level}",
+            )
+        except ToolError as e:
+            accounts.setdefault(
+                root_id, {"customer_id": root_id, "error": str(e)}
+            )
+            continue
+        for row in rows:
+            customer_id = str(row["customer_client.id"])
+            level = row["customer_client.level"]
+            # Prefer direct access over access through a manager.
+            if customer_id in accounts and level > 0:
+                continue
+            accounts[customer_id] = {
+                "customer_id": customer_id,
+                "name": row["customer_client.descriptive_name"],
+                "currency_code": row["customer_client.currency_code"],
+                "time_zone": row["customer_client.time_zone"],
+                "manager": row["customer_client.manager"],
+                "test_account": row["customer_client.test_account"],
+                "status": row["customer_client.status"],
+                "login_customer_id": root_id,
+                "directly_accessible": level == 0,
+            }
+    return list(accounts.values())

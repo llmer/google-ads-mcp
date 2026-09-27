@@ -14,6 +14,7 @@
 
 """Integration tests for dynamic tool mounting and namespacing based on configuration."""
 
+import importlib.resources
 import unittest
 from unittest.mock import patch
 from fastmcp import FastMCP
@@ -48,6 +49,30 @@ class TestToolsMounting(unittest.IsolatedAsyncioTestCase):
         self.assertIn("customers_list_accessible_customers", tool_names)
         self.assertIn("search_search", tool_names)
         self.assertIn("metadata_get_resource_metadata", tool_names)
+
+    async def test_mounting_bundled_default_config(self):
+        """Tests that the bundled config enables the campaign management tools."""
+        bundled = ToolsConfig.load(
+            str(
+                importlib.resources.files("ads_mcp").joinpath(
+                    "tools_config.yaml"
+                )
+            )
+        )
+
+        parent = FastMCP("Test Parent")
+        with patch("ads_mcp.config.ToolsConfig.load", return_value=bundled):
+            initialize_and_mount_tools(parent)
+        tools = await parent.list_tools()
+        tool_names = [t.name for t in tools]
+
+        self.assertIn("customers_list_accounts", tool_names)
+        self.assertIn("campaigns_create_pmax_campaign", tool_names)
+        self.assertIn("assets_upload_image", tool_names)
+        self.assertIn("targeting_set_geo_targets", tool_names)
+        self.assertIn("conversions_create_conversion_action", tool_names)
+        self.assertIn("campaigns_get_spend_overview", tool_names)
+        self.assertIn("assets_list_assets", tool_names)
 
     @patch("ads_mcp.config.ToolsConfig.load")
     async def test_mounting_disabled_namespaces(self, mock_load):

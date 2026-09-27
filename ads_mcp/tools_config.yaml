@@ -7,3 +7,24 @@ namespaces:
   customers: true
   search: true
   metadata: true
+  # The namespaces below create and modify campaigns, assets and conversion
+  # tracking. Set them to false for a read-only server.
+  campaigns: true
+  assets: true
+  targeting: true
+  conversions: true
+
+# Spend guardrails, enforced by the server on create_*_campaign, update_budget
+# and enable_campaign. Amounts are in each account's currency. Unset (null)
+# means no limit. See ads_mcp/guardrails.py.
+guardrails:
+  # Maximum daily budget of a single campaign.
+  max_daily_budget: null
+  # Maximum total daily budget of all enabled campaigns in an account.
+  max_total_daily_budget: null
+  # Maximum budget increase in a single update_budget call, in percent.
+  max_budget_increase_percent: null
+  # Per-account overrides, keyed by customer ID:
+  # accounts:
+  #   "1234567890":
+  #     max_total_daily_budget: 2000
