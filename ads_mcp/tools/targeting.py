@@ -547,6 +547,8 @@ def add_keywords(
         The keywords added and the ones skipped because they already exist.
     """
     customer_id = utils.clean_customer_id(customer_id)
+    if match_type not in ("BROAD", "PHRASE", "EXACT"):
+        raise ToolError("match_type must be BROAD, PHRASE or EXACT.")
     # (text, match type) -> keyword as given, in order and without duplicates.
     wanted: Dict[tuple, str] = {}
     for keyword in keywords or []:
