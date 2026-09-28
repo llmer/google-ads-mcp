@@ -89,6 +89,67 @@ class TestUpdateCampaignSettings(MutateToolTestCase):
         with self.assertRaises(ToolError):
             campaigns.update_campaign_settings("1", 5)
 
+    def test_sets_name_networks_and_end_date(self):
+        result = campaigns.update_campaign_settings(
+            "1",
+            5,
+            name=" Search - Brand ",
+            target_google_search=True,
+            target_search_network=False,
+            target_content_network=False,
+            end_date="2026-12-31",
+        )
+        [[op]] = self.mutate_calls()
+        campaign = op.campaign_operation.update
+        self.assertEqual(campaign.resource_name, "customers/1/campaigns/5")
+        self.assertEqual(campaign.name, "Search - Brand")
+        self.assertTrue(campaign.network_settings.target_google_search)
+        self.assertFalse(campaign.network_settings.target_search_network)
+        # False is sent explicitly, not left unset.
+        self.assertIn("target_content_network", campaign.network_settings)
+        self.assertEqual(campaign.end_date_time, "2026-12-31 23:59:59")
+        self.assertEqual(
+            list(op.campaign_operation.update_mask.paths),
+            [
+                "name",
+                "network_settings.target_google_search",
+                "network_settings.target_search_network",
+                "network_settings.target_content_network",
+                "end_date_time",
+            ],
+        )
+        # Nothing else is read or changed.
+        self.assertEqual(self.queries, [])
+        self.assertEqual(result["changed"]["end_date"], "2026-12-31")
+        self.assertFalse(result["validate_only"])
+
+    def test_clear_end_date_masks_the_unset_field(self):
+        result = campaigns.update_campaign_settings(
+            "1", 5, clear_end_date=True, validate_only=True
+        )
+        [[op]] = self.mutate_calls()
+        campaign = op.campaign_operation.update
+        self.assertNotIn("end_date_time", campaign)
+        self.assertEqual(
+            list(op.campaign_operation.update_mask.paths), ["end_date_time"]
+        )
+        self.assertTrue(
+            self.service.mutate.call_args.kwargs["request"].validate_only
+        )
+        self.assertEqual(result["changed"], {"end_date": None})
+        self.assertTrue(result["validate_only"])
+
+    def test_rejects_bad_name_and_end_date(self):
+        for kwargs in [
+            {"name": "  "},
+            {"end_date": "12/31/2026"},
+            {"end_date": ""},
+            {"end_date": "2026-12-31", "clear_end_date": True},
+        ]:
+            with self.assertRaises(ToolError, msg=kwargs):
+                campaigns.update_campaign_settings("1", 5, **kwargs)
+        self.service.mutate.assert_not_called()
+
 
 class TestUpdateAccountTracking(MutateToolTestCase):
 

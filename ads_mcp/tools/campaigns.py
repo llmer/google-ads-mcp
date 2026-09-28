@@ -1335,12 +1335,20 @@ def update_campaign_settings(
     device_bid_adjustments: Dict[str, float] | None = None,
     text_asset_automation: _OPT | None = None,
     final_url_expansion: _OPT | None = None,
+    name: str | None = None,
+    target_google_search: bool | None = None,
+    target_search_network: bool | None = None,
+    target_content_network: bool | None = None,
+    end_date: str | None = None,
+    clear_end_date: bool = False,
     validate_only: bool = False,
     login_customer_id: str | int | None = None,
 ) -> Dict[str, Any]:
-    """Updates campaign settings that are not about budget or targeting lists.
+    """Updates campaign settings that are not about budget, bidding or targeting lists.
 
-    Only the given settings are changed. None of them can raise a budget.
+    Only the given settings are changed. None of them can raise a budget or
+    enable the campaign. Adding networks spreads the same budget over more
+    placements.
 
     Args:
         customer_id: The Google Ads customer ID.
@@ -1356,6 +1364,14 @@ def update_campaign_settings(
           headlines and descriptions from the landing page (Search, PMax).
         final_url_expansion: OPTED_OUT stops Google from sending clicks to
           other pages of the site than the ad's final URL.
+        name: A new campaign name, unique in the account.
+        target_google_search: Whether ads show on Google Search.
+        target_search_network: Whether ads also show on Google search partner
+          sites (needs target_google_search).
+        target_content_network: Whether a Search campaign's ads also show on
+          the Display Network (Display expansion).
+        end_date: The campaign's last day, YYYY-MM-DD, in the account time zone.
+        clear_end_date: Remove the end date, so the campaign runs indefinitely.
         validate_only: If true, validates the request without changing anything.
         login_customer_id: Optional manager customer ID to use as the login-customer-id header.
 
@@ -1364,16 +1380,38 @@ def update_campaign_settings(
     """
     customer_id = utils.clean_customer_id(customer_id)
     campaign_id = mutations.parse_id(campaign_id, "campaign_id")
-    if not any(
-        v is not None
-        for v in (
-            location_targeting,
-            device_bid_adjustments,
-            text_asset_automation,
-            final_url_expansion,
+    networks = {
+        "target_google_search": target_google_search,
+        "target_search_network": target_search_network,
+        "target_content_network": target_content_network,
+    }
+    if (
+        not any(
+            v is not None
+            for v in (
+                location_targeting,
+                device_bid_adjustments,
+                text_asset_automation,
+                final_url_expansion,
+                name,
+                end_date,
+                *networks.values(),
+            )
         )
+        and not clear_end_date
     ):
         raise ToolError("Nothing to update: give at least one setting.")
+    if name is not None and not name.strip():
+        raise ToolError("name must not be empty.")
+    if end_date is not None and clear_end_date:
+        raise ToolError("Give end_date or clear_end_date, not both.")
+    end_date_time = None
+    if end_date is not None:
+        end_date_time = mutations.format_date_time(end_date, end_of_day=True)
+        if not end_date_time:
+            raise ToolError(
+                "end_date must be YYYY-MM-DD; use clear_end_date to remove it."
+            )
     client = utils.get_googleads_client(login_customer_id=login_customer_id)
     campaign_rn = _campaign_rn(customer_id, campaign_id)
     operations: List[Tuple[Any, str]] = []
@@ -1383,6 +1421,23 @@ def update_campaign_settings(
     op = client.get_type("MutateOperation")
     campaign = op.campaign_operation.update
     campaign.resource_name = campaign_rn
+    if name is not None:
+        campaign.name = name.strip()
+        paths.append("name")
+        changed["name"] = campaign.name
+    for field, value in networks.items():
+        if value is not None:
+            setattr(campaign.network_settings, field, value)
+            paths.append(f"network_settings.{field}")
+            changed[field] = value
+    if end_date_time:
+        campaign.end_date_time = end_date_time
+        paths.append("end_date_time")
+        changed["end_date"] = end_date
+    elif clear_end_date:
+        # Masked but unset, the field is cleared: no end date.
+        paths.append("end_date_time")
+        changed["end_date"] = None
     if location_targeting is not None:
         campaign.geo_target_type_setting.positive_geo_target_type = (
             client.enums.PositiveGeoTargetTypeEnum[location_targeting]
