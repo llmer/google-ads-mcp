@@ -516,7 +516,9 @@ def set_campaign_conversion_goals(
     customer_id = utils.clean_customer_id(customer_id)
     campaign_id = mutations.parse_id(campaign_id, "campaign_id")
     if not biddable_goals:
-        raise ToolError("Give at least one biddable goal, e.g. PURCHASE:WEBSITE.")
+        raise ToolError(
+            "Give at least one biddable goal, e.g. PURCHASE:WEBSITE."
+        )
     wanted = set()
     for goal in biddable_goals:
         category, sep, origin = goal.upper().partition(":")
@@ -534,7 +536,10 @@ def set_campaign_conversion_goals(
         f"WHERE campaign.id = {campaign_id}",
     )
     available = {
-        (row["campaign_conversion_goal.category"], row["campaign_conversion_goal.origin"]): row
+        (
+            row["campaign_conversion_goal.category"],
+            row["campaign_conversion_goal.origin"],
+        ): row
         for row in rows
     }
     missing = wanted - set(available)
@@ -559,9 +564,15 @@ def set_campaign_conversion_goals(
         goal.resource_name = row["campaign_conversion_goal.resource_name"]
         goal.biddable = biddable
         mutations.update_mask(
-            client, op.campaign_conversion_goal_operation.update_mask, ["biddable"]
+            client,
+            op.campaign_conversion_goal_operation.update_mask,
+            ["biddable"],
         )
         operations.append((op, f"goal {':'.join(key)}"))
     if operations:
         mutations.mutate(client, customer_id, operations, validate_only)
-    return {"campaign_id": campaign_id, **result, "validate_only": validate_only}
+    return {
+        "campaign_id": campaign_id,
+        **result,
+        "validate_only": validate_only,
+    }

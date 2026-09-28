@@ -1304,7 +1304,9 @@ _OPT = Literal["OPTED_IN", "OPTED_OUT"]
 def update_campaign_settings(
     customer_id: str | int,
     campaign_id: str | int,
-    location_targeting: Literal["PRESENCE", "PRESENCE_OR_INTEREST"] | None = None,
+    location_targeting: (
+        Literal["PRESENCE", "PRESENCE_OR_INTEREST"] | None
+    ) = None,
     device_bid_adjustments: Dict[str, float] | None = None,
     text_asset_automation: _OPT | None = None,
     final_url_expansion: _OPT | None = None,
@@ -1371,12 +1373,12 @@ def update_campaign_settings(
             if status is None:
                 continue
             setting = client.get_type("Campaign").AssetAutomationSetting()
-            setting.asset_automation_type = client.enums.AssetAutomationTypeEnum[
-                automation_type
-            ]
-            setting.asset_automation_status = client.enums.AssetAutomationStatusEnum[
-                status
-            ]
+            setting.asset_automation_type = (
+                client.enums.AssetAutomationTypeEnum[automation_type]
+            )
+            setting.asset_automation_status = (
+                client.enums.AssetAutomationStatusEnum[status]
+            )
             campaign.asset_automation_settings.append(setting)
         paths.append("asset_automation_settings")
         changed["text_asset_automation"] = text_asset_automation
@@ -1419,7 +1421,9 @@ def update_campaign_settings(
                 criterion.resource_name = existing[device]
                 criterion.bid_modifier = modifier
                 mutations.update_mask(
-                    client, op.campaign_criterion_operation.update_mask, ["bid_modifier"]
+                    client,
+                    op.campaign_criterion_operation.update_mask,
+                    ["bid_modifier"],
                 )
             else:
                 criterion = op.campaign_criterion_operation.create
@@ -1430,7 +1434,11 @@ def update_campaign_settings(
         changed["device_bid_adjustments"] = adjustments
 
     mutations.mutate(client, customer_id, operations, validate_only)
-    return {"campaign_id": campaign_id, "changed": changed, "validate_only": validate_only}
+    return {
+        "campaign_id": campaign_id,
+        "changed": changed,
+        "validate_only": validate_only,
+    }
 
 
 @campaigns_mcp.tool(annotations=_UPDATE)
@@ -1486,7 +1494,9 @@ def set_auto_apply_recommendations(
         sub.resource_name = row["recommendation_subscription.resource_name"]
         sub.status = client.enums.RecommendationSubscriptionStatusEnum[status]
         mutations.update_mask(
-            client, op.recommendation_subscription_operation.update_mask, ["status"]
+            client,
+            op.recommendation_subscription_operation.update_mask,
+            ["status"],
         )
         operations.append((op, f"auto-apply {rtype}"))
         changed.append(rtype)
@@ -1560,16 +1570,23 @@ def set_cpc_bids(
         raise ToolError("Manual bids only apply to MANUAL_CPC campaigns.")
 
     operations = []
-    result: Dict[str, Any] = {"ad_group": group["ad_group.name"], "keywords": {}}
+    result: Dict[str, Any] = {
+        "ad_group": group["ad_group.name"],
+        "keywords": {},
+    }
     if default_cpc is not None:
         op = client.get_type("MutateOperation")
         ag = op.ad_group_operation.update
         ag.resource_name = group["ad_group.resource_name"]
         ag.cpc_bid_micros = mutations.to_micros(default_cpc)
-        mutations.update_mask(client, op.ad_group_operation.update_mask, ["cpc_bid_micros"])
+        mutations.update_mask(
+            client, op.ad_group_operation.update_mask, ["cpc_bid_micros"]
+        )
         operations.append((op, "ad group default CPC"))
         result["default_cpc"] = {
-            "before": mutations.from_micros(group.get("ad_group.cpc_bid_micros")),
+            "before": mutations.from_micros(
+                group.get("ad_group.cpc_bid_micros")
+            ),
             "after": default_cpc,
         }
 
@@ -1595,17 +1612,23 @@ def set_cpc_bids(
             text, match_type = mutations.parse_keyword(keyword, "BROAD")
             row = existing.get((text.lower(), match_type))
             if row is None:
-                raise ToolError(f"Keyword {keyword!r} is not in campaign {campaign_id}.")
+                raise ToolError(
+                    f"Keyword {keyword!r} is not in campaign {campaign_id}."
+                )
             op = client.get_type("MutateOperation")
             criterion = op.ad_group_criterion_operation.update
             criterion.resource_name = row["ad_group_criterion.resource_name"]
             criterion.cpc_bid_micros = mutations.to_micros(bid) if bid else 0
             mutations.update_mask(
-                client, op.ad_group_criterion_operation.update_mask, ["cpc_bid_micros"]
+                client,
+                op.ad_group_criterion_operation.update_mask,
+                ["cpc_bid_micros"],
             )
             operations.append((op, f"keyword {keyword}"))
             result["keywords"][keyword] = {
-                "before": mutations.from_micros(row.get("ad_group_criterion.cpc_bid_micros")),
+                "before": mutations.from_micros(
+                    row.get("ad_group_criterion.cpc_bid_micros")
+                ),
                 "after": bid or None,
             }
 

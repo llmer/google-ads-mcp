@@ -159,6 +159,14 @@ def update_account_tracking(
     customer.resource_name = f"customers/{customer_id}"
     for field, value in changes.items():
         setattr(customer, field, value)
-    mutations.update_mask(client, op.customer_operation.update_mask, list(changes))
-    mutations.mutate(client, customer_id, [(op, "account tracking")], validate_only)
-    return {"customer_id": customer_id, "changed": changes, "validate_only": validate_only}
+    mutations.update_mask(
+        client, op.customer_operation.update_mask, list(changes)
+    )
+    mutations.mutate(
+        client, customer_id, [(op, "account tracking")], validate_only
+    )
+    return {
+        "customer_id": customer_id,
+        "changed": changes,
+        "validate_only": validate_only,
+    }

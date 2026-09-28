@@ -867,9 +867,19 @@ _SNIPPET_VALUE_MAX = 25
 _PRICE_TEXT_MAX = 25
 _BUSINESS_NAME_MAX = 25
 _SNIPPET_HEADERS = {
-    "Amenities", "Brands", "Courses", "Degree programs", "Destinations",
-    "Featured hotels", "Insurance coverage", "Models", "Neighborhoods",
-    "Service catalog", "Shows", "Styles", "Types",
+    "Amenities",
+    "Brands",
+    "Courses",
+    "Degree programs",
+    "Destinations",
+    "Featured hotels",
+    "Insurance coverage",
+    "Models",
+    "Neighborhoods",
+    "Service catalog",
+    "Shows",
+    "Styles",
+    "Types",
 }
 
 
@@ -890,8 +900,12 @@ class Sitelink(BaseModel):
 class StructuredSnippet(BaseModel):
     """A structured snippet: a header and a list of values."""
 
-    header: str = Field(description="One of Google's headers, e.g. Styles, Types, Brands.")
-    values: List[str] = Field(description="3-10 values, max 25 characters each.")
+    header: str = Field(
+        description="One of Google's headers, e.g. Styles, Types, Brands."
+    )
+    values: List[str] = Field(
+        description="3-10 values, max 25 characters each."
+    )
 
 
 class PriceItem(BaseModel):
@@ -899,17 +913,36 @@ class PriceItem(BaseModel):
 
     header: str = Field(description="Max 25 characters.")
     description: str = Field(description="Max 25 characters.")
-    price: float = Field(description="Price in the currency of the price asset.")
+    price: float = Field(
+        description="Price in the currency of the price asset."
+    )
     final_url: str = Field(description="Landing page for this offering.")
-    unit: Literal["PER_HOUR", "PER_DAY", "PER_WEEK", "PER_MONTH", "PER_YEAR", "PER_NIGHT"] | None = None
+    unit: (
+        Literal[
+            "PER_HOUR",
+            "PER_DAY",
+            "PER_WEEK",
+            "PER_MONTH",
+            "PER_YEAR",
+            "PER_NIGHT",
+        ]
+        | None
+    ) = None
 
 
 class PriceAsset(BaseModel):
     """A price asset: 3-8 offerings of one type."""
 
     type: Literal[
-        "BRANDS", "EVENTS", "LOCATIONS", "NEIGHBORHOODS", "PRODUCT_CATEGORIES",
-        "PRODUCT_TIERS", "SERVICES", "SERVICE_CATEGORIES", "SERVICE_TIERS",
+        "BRANDS",
+        "EVENTS",
+        "LOCATIONS",
+        "NEIGHBORHOODS",
+        "PRODUCT_CATEGORIES",
+        "PRODUCT_TIERS",
+        "SERVICES",
+        "SERVICE_CATEGORIES",
+        "SERVICE_TIERS",
     ]
     currency_code: str = Field(description='ISO 4217, e.g. "USD".')
     language_code: str = Field(default="en", description='e.g. "en".')
@@ -919,7 +952,9 @@ class PriceAsset(BaseModel):
 
 def _check_len(label: str, text: str, limit: int) -> None:
     if not text or len(text) > limit:
-        raise ToolError(f"{label} must be 1-{limit} characters: {text!r} ({len(text or '')}).")
+        raise ToolError(
+            f"{label} must be 1-{limit} characters: {text!r} ({len(text or '')})."
+        )
 
 
 @assets_mcp.tool(annotations=_CREATE)
@@ -970,15 +1005,21 @@ def add_campaign_assets(
     campaign_ids = [mutations.parse_id(c, "campaign_id") for c in campaign_ids]
     sitelinks = sitelinks or []
     callouts = callouts or []
-    image_asset_ids = [mutations.parse_id(i, "image_asset_id") for i in (image_asset_ids or [])]
+    image_asset_ids = [
+        mutations.parse_id(i, "image_asset_id") for i in (image_asset_ids or [])
+    ]
 
     for link in sitelinks:
         _check_len("Sitelink text", link.text, _SITELINK_TEXT_MAX)
         if bool(link.description1) != bool(link.description2):
-            raise ToolError(f"Sitelink {link.text!r}: give both description lines or neither.")
+            raise ToolError(
+                f"Sitelink {link.text!r}: give both description lines or neither."
+            )
         for line in (link.description1, link.description2):
             if line:
-                _check_len("Sitelink description", line, _SITELINK_DESCRIPTION_MAX)
+                _check_len(
+                    "Sitelink description", line, _SITELINK_DESCRIPTION_MAX
+                )
     for text in callouts:
         _check_len("Callout", text, _CALLOUT_MAX)
     if structured_snippet:
@@ -1021,7 +1062,9 @@ def add_campaign_assets(
         key = {
             "SITELINK": row.get("asset.sitelink_asset.link_text"),
             "CALLOUT": row.get("asset.callout_asset.callout_text"),
-            "STRUCTURED_SNIPPET": row.get("asset.structured_snippet_asset.header"),
+            "STRUCTURED_SNIPPET": row.get(
+                "asset.structured_snippet_asset.header"
+            ),
             "PRICE": row.get("asset.price_asset.type"),
             "BUSINESS_NAME": row.get("asset.text_asset.text"),
             "BUSINESS_LOGO": str(row.get("asset.id")),
@@ -1033,31 +1076,40 @@ def add_campaign_assets(
     # (field type, key, builder or existing asset resource name)
     wanted: List[Tuple[str, str, Any]] = []
     for link in sitelinks:
+
         def build(asset, link=link):
             asset.final_urls.append(link.final_url)
             asset.sitelink_asset.link_text = link.text
             if link.description1:
                 asset.sitelink_asset.description1 = link.description1
                 asset.sitelink_asset.description2 = link.description2
+
         wanted.append(("SITELINK", link.text, build))
     for text in callouts:
+
         def build(asset, text=text):
             asset.callout_asset.callout_text = text
+
         wanted.append(("CALLOUT", text, build))
     if structured_snippet:
+
         def build(asset, snippet=structured_snippet):
             asset.structured_snippet_asset.header = snippet.header
             asset.structured_snippet_asset.values.extend(snippet.values)
+
         wanted.append(("STRUCTURED_SNIPPET", structured_snippet.header, build))
     if price:
+
         def build(asset, price=price):
             p = asset.price_asset
             p.type_ = client.enums.PriceExtensionTypeEnum[price.type]
             p.language_code = price.language_code
             if price.qualifier:
-                p.price_qualifier = client.enums.PriceExtensionPriceQualifierEnum[
-                    price.qualifier
-                ]
+                p.price_qualifier = (
+                    client.enums.PriceExtensionPriceQualifierEnum[
+                        price.qualifier
+                    ]
+                )
             for item in price.items:
                 offering = client.get_type("PriceOffering")
                 offering.header = item.header
@@ -1066,18 +1118,37 @@ def add_campaign_assets(
                 offering.price.currency_code = price.currency_code
                 offering.price.amount_micros = mutations.to_micros(item.price)
                 if item.unit:
-                    offering.unit = client.enums.PriceExtensionPriceUnitEnum[item.unit]
+                    offering.unit = client.enums.PriceExtensionPriceUnitEnum[
+                        item.unit
+                    ]
                 p.price_offerings.append(offering)
+
         wanted.append(("PRICE", price.type, build))
     if business_name:
+
         def build(asset, name=business_name):
             asset.text_asset.text = name
+
         wanted.append(("BUSINESS_NAME", business_name, build))
     if business_logo_asset_id is not None:
-        logo_id = mutations.parse_id(business_logo_asset_id, "business_logo_asset_id")
-        wanted.append(("BUSINESS_LOGO", logo_id, mutations.resource_name(customer_id, "assets", logo_id)))
+        logo_id = mutations.parse_id(
+            business_logo_asset_id, "business_logo_asset_id"
+        )
+        wanted.append(
+            (
+                "BUSINESS_LOGO",
+                logo_id,
+                mutations.resource_name(customer_id, "assets", logo_id),
+            )
+        )
     for image_id in image_asset_ids:
-        wanted.append(("AD_IMAGE", image_id, mutations.resource_name(customer_id, "assets", image_id)))
+        wanted.append(
+            (
+                "AD_IMAGE",
+                image_id,
+                mutations.resource_name(customer_id, "assets", image_id),
+            )
+        )
     if not wanted:
         raise ToolError("Nothing to add.")
 
@@ -1093,7 +1164,9 @@ def add_campaign_assets(
             continue
         if callable(source):
             temp_id -= 1
-            asset_rn = f"customers/{customer_id}/assets/{temp_id}"  # temporary ID
+            asset_rn = (
+                f"customers/{customer_id}/assets/{temp_id}"  # temporary ID
+            )
             op = client.get_type("MutateOperation")
             asset = op.asset_operation.create
             asset.resource_name = asset_rn
