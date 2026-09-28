@@ -1252,6 +1252,14 @@ def _set_campaign_status(
             row.get("campaign.campaign_budget"),
             daily_budget,
         )
+        guardrails.check_serving_cpc_bids(
+            client,
+            customer_id,
+            limits,
+            [f"campaign.id = {campaign_id}", "ad_group.status = 'ENABLED'"],
+            "enabling this campaign",
+            "Lower those bids first, e.g. with set_cpc_bids.",
+        )
 
     op = client.get_type("MutateOperation")
     campaign = op.campaign_operation.update
@@ -1307,7 +1315,8 @@ def enable_campaign(
 
     Before enabling, review the campaign with get_campaign and the account's
     current spend with get_spend_overview, and confirm with the user. Refused
-    if it would break the spend guardrails configured on the server.
+    if it would break the spend guardrails configured on the server,
+    including Manual CPC keyword bids above max_cpc_bid.
 
     Args:
         customer_id: The Google Ads customer ID.
@@ -1679,6 +1688,18 @@ def set_cpc_bids(
     group = groups[0]
     if group.get("campaign.bidding_strategy_type") != "MANUAL_CPC":
         raise ToolError("Manual bids only apply to MANUAL_CPC campaigns.")
+    cleared = [k for k, bid in (keyword_bids or {}).items() if not bid]
+    if cleared and default_cpc is None:
+        # Keywords without a bid use the ad group's current default bid.
+        default_bid = mutations.from_micros(
+            group.get("ad_group.cpc_bid_micros")
+        )
+        guardrails.check_effective_cpc_bids(
+            limits,
+            [(keyword, default_bid) for keyword in cleared],
+            "clearing these keyword bids",
+            "Also give a default_cpc within the limit.",
+        )
 
     operations = []
     result: Dict[str, Any] = {
@@ -1729,7 +1750,10 @@ def set_cpc_bids(
             op = client.get_type("MutateOperation")
             criterion = op.ad_group_criterion_operation.update
             criterion.resource_name = row["ad_group_criterion.resource_name"]
-            criterion.cpc_bid_micros = mutations.to_micros(bid) if bid else 0
+            if bid:
+                criterion.cpc_bid_micros = mutations.to_micros(bid)
+            # Otherwise the masked, unset bid is cleared, so the keyword uses
+            # the ad group's default bid. An explicit 0 would not clear it.
             mutations.update_mask(
                 client,
                 op.ad_group_criterion_operation.update_mask,
@@ -1899,43 +1923,47 @@ def set_bidding_strategy(
         )
         if limits.max_cpc_bid is not None:
             # Stored bids apply again under Manual CPC: ad group defaults
-            # (unless default_cpc replaces them) and keyword bids, which
-            # override the default.
-            bids = {}
+            # (unless default_cpc replaces them), and keyword and dynamic
+            # search ad webpage bids, which override the default.
+            bids = []
             if default_cpc is None:
-                bids = {
-                    f"ad group {g['ad_group.name']}": mutations.from_micros(
-                        g.get("ad_group.cpc_bid_micros")
+                bids = [
+                    (
+                        f"ad group {group['ad_group.name']}",
+                        mutations.from_micros(
+                            group.get("ad_group.cpc_bid_micros")
+                        ),
                     )
-                    for g in ad_groups
-                }
-            for row in mutations.search(
+                    for group in ad_groups
+                ]
+            criteria = mutations.search(
                 client,
                 customer_id,
-                "SELECT ad_group.name, ad_group_criterion.keyword.text, "
+                "SELECT ad_group_criterion.criterion_id, "
+                "ad_group_criterion.type, ad_group_criterion.keyword.text, "
                 "ad_group_criterion.keyword.match_type, "
-                "ad_group_criterion.cpc_bid_micros FROM ad_group_criterion "
-                f"WHERE campaign.id = {campaign_id} "
-                "AND ad_group_criterion.type = 'KEYWORD' "
+                "ad_group_criterion.cpc_bid_micros, ad_group.id "
+                f"FROM ad_group_criterion WHERE campaign.id = {campaign_id} "
+                "AND ad_group_criterion.type IN ('KEYWORD', 'WEBPAGE') "
                 "AND ad_group_criterion.negative = FALSE "
                 "AND ad_group_criterion.status != 'REMOVED' "
                 "AND ad_group.status != 'REMOVED'",
-            ):
-                keyword = mutations.format_keyword(
-                    row["ad_group_criterion.keyword.text"],
-                    row["ad_group_criterion.keyword.match_type"],
-                )
-                bids[f"{keyword} in ad group {row['ad_group.name']}"] = (
+            )
+            bids += [
+                (
+                    mutations.criterion_label(criterion),
                     mutations.from_micros(
-                        row.get("ad_group_criterion.cpc_bid_micros")
-                    )
+                        criterion.get("ad_group_criterion.cpc_bid_micros")
+                    ),
                 )
+                for criterion in criteria
+            ]
             guardrails.check_effective_cpc_bids(
                 limits,
                 bids,
                 "switching to MANUAL_CPC",
                 "default_cpc replaces ad group default bids, but not keyword "
-                "bids.",
+                "or webpage bids.",
             )
 
     field, type_name, subfield = _STRATEGIES[bidding_strategy]
@@ -2143,6 +2171,20 @@ def create_responsive_search_ad(
             "Responsive search ads can only be added to Search campaigns."
         )
     ad_group_id = str(group["ad_group.id"])
+    if status == "ENABLED":
+        # An enabled ad lets the ad group's keywords serve.
+        guardrails.check_serving_cpc_bids(
+            client,
+            customer_id,
+            guardrails.get_limits(customer_id),
+            [
+                f"ad_group.id = {ad_group_id}",
+                "ad_group.status = 'ENABLED'",
+                "campaign.status = 'ENABLED'",
+            ],
+            "an enabled ad in this ad group",
+            "Create the ad PAUSED, or lower those bids first.",
+        )
 
     op = client.get_type("MutateOperation")
     ad_group_ad = op.ad_group_ad_operation.create
@@ -2291,6 +2333,23 @@ def set_ad_status(
         )
         operations.append((op, f"ad {entry['ad_id']}"))
         changed.append(entry)
+    if status == "ENABLED" and changed:
+        # An enabled ad lets its ad group's keywords serve.
+        ad_group_ids = ", ".join(
+            dict.fromkeys(e["ad_group_id"] for e in changed)
+        )
+        guardrails.check_serving_cpc_bids(
+            client,
+            customer_id,
+            guardrails.get_limits(customer_id),
+            [
+                f"ad_group.id IN ({ad_group_ids})",
+                "ad_group.status = 'ENABLED'",
+                "campaign.status = 'ENABLED'",
+            ],
+            "enabling these ads",
+            "Lower those bids first, e.g. with set_cpc_bids.",
+        )
     if operations:
         mutations.mutate(client, customer_id, operations, validate_only)
     return {
@@ -2339,8 +2398,7 @@ def update_ad_group(
     rows = mutations.search(
         client,
         customer_id,
-        "SELECT ad_group.name, ad_group.status, campaign.id, "
-        "campaign.bidding_strategy_type FROM ad_group "
+        "SELECT ad_group.name, ad_group.status, campaign.id FROM ad_group "
         f"WHERE ad_group.id = {ad_group_id}",
     )
     if not rows:
@@ -2348,38 +2406,16 @@ def update_ad_group(
     row = rows[0]
     if row.get("ad_group.status") == "REMOVED":
         raise ToolError(f"Ad group {ad_group_id} was removed.")
-    if (
-        status == "ENABLED"
-        and row.get("ad_group.status") != "ENABLED"
-        and row.get("campaign.bidding_strategy_type") == "MANUAL_CPC"
-    ):
-        limits = guardrails.get_limits(customer_id)
-        if limits.max_cpc_bid is not None:
-            keywords = mutations.search(
-                client,
-                customer_id,
-                "SELECT ad_group_criterion.keyword.text, "
-                "ad_group_criterion.keyword.match_type, "
-                "ad_group_criterion.effective_cpc_bid_micros "
-                f"FROM ad_group_criterion WHERE ad_group.id = {ad_group_id} "
-                "AND ad_group_criterion.type = 'KEYWORD' "
-                "AND ad_group_criterion.negative = FALSE "
-                "AND ad_group_criterion.status = 'ENABLED'",
-            )
-            guardrails.check_effective_cpc_bids(
-                limits,
-                {
-                    mutations.format_keyword(
-                        k["ad_group_criterion.keyword.text"],
-                        k["ad_group_criterion.keyword.match_type"],
-                    ): mutations.from_micros(
-                        k.get("ad_group_criterion.effective_cpc_bid_micros")
-                    )
-                    for k in keywords
-                },
-                "enabling this ad group",
-                "Lower its bids first, e.g. with set_cpc_bids.",
-            )
+    if status == "ENABLED" and row.get("ad_group.status") != "ENABLED":
+        # Its keywords serve once it is enabled, if its campaign is.
+        guardrails.check_serving_cpc_bids(
+            client,
+            customer_id,
+            guardrails.get_limits(customer_id),
+            [f"ad_group.id = {ad_group_id}", "campaign.status = 'ENABLED'"],
+            "enabling this ad group",
+            "Lower those bids first, e.g. with set_cpc_bids.",
+        )
 
     op = client.get_type("MutateOperation")
     ad_group = op.ad_group_operation.update

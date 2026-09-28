@@ -197,6 +197,22 @@ def format_keyword(text: str, match_type: str) -> str:
     return {"EXACT": f"[{text}]", "PHRASE": f'"{text}"'}.get(match_type, text)
 
 
+def criterion_label(row: Dict[str, Any]) -> str:
+    """Describes an ad group criterion from a GAQL row, e.g.
+    "[running shoes] in ad group 7"."""
+    if row.get("ad_group_criterion.type", "KEYWORD") == "KEYWORD":
+        what = format_keyword(
+            row.get("ad_group_criterion.keyword.text", ""),
+            row.get("ad_group_criterion.keyword.match_type", ""),
+        )
+    else:
+        what = (
+            f"{row['ad_group_criterion.type'].lower()} "
+            f"{row.get('ad_group_criterion.criterion_id')}"
+        )
+    return f"{what} in ad group {row.get('ad_group.id')}"
+
+
 def update_mask(client: GoogleAdsClient, target, paths: Iterable[str]):
     """Sets the update_mask of an update operation to the given field paths."""
     client.copy_from(target, field_mask_pb2.FieldMask(paths=list(paths)))

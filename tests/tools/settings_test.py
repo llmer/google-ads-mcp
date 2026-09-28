@@ -422,6 +422,51 @@ class TestSetCpcBids(MutateToolTestCase):
         with self.assertRaises(ToolError):
             campaigns.set_cpc_bids("1", 5, default_cpc=0.3)
 
+    def test_clearing_a_keyword_bid_masks_the_unset_field(self):
+        keyword = {
+            "ad_group_criterion.resource_name": "customers/1/adGroupCriteria/7~9",
+            "ad_group_criterion.keyword.text": "running shoes",
+            "ad_group_criterion.keyword.match_type": "EXACT",
+            "ad_group_criterion.cpc_bid_micros": 900_000,
+        }
+        self.search_results = [[self._group()], [keyword]]
+        result = campaigns.set_cpc_bids(
+            "1", 5, keyword_bids={"[running shoes]": 0}
+        )
+        [[op]] = self.mutate_calls()
+        update = op.ad_group_criterion_operation
+        self.assertNotIn("cpc_bid_micros", update.update)
+        self.assertEqual(list(update.update_mask.paths), ["cpc_bid_micros"])
+        self.assertIsNone(result["keywords"]["[running shoes]"]["after"])
+
+    def test_clearing_refused_when_the_default_bid_is_above_the_limit(self):
+        from ads_mcp import guardrails
+        from unittest.mock import patch
+
+        keyword = {
+            "ad_group_criterion.resource_name": "customers/1/adGroupCriteria/7~9",
+            "ad_group_criterion.keyword.text": "running shoes",
+            "ad_group_criterion.keyword.match_type": "EXACT",
+            "ad_group_criterion.cpc_bid_micros": 900_000,
+        }
+        group = {**self._group(), "ad_group.cpc_bid_micros": 3_000_000}
+        with patch.object(
+            guardrails,
+            "get_limits",
+            return_value=guardrails.SpendLimits(max_cpc_bid=2.0),
+        ):
+            self.search_results = [[group], [keyword]]
+            with self.assertRaisesRegex(ToolError, "clearing these keyword"):
+                campaigns.set_cpc_bids(
+                    "1", 5, keyword_bids={"[running shoes]": 0}
+                )
+            self.service.mutate.assert_not_called()
+            self.search_results = [[group], [keyword]]
+            campaigns.set_cpc_bids(
+                "1", 5, default_cpc=1.0, keyword_bids={"[running shoes]": 0}
+            )
+        self.assertEqual(len(self.mutate_calls()), 1)
+
     def test_unknown_keyword_is_an_error(self):
         self.search_results = [[self._group()], []]
         with self.assertRaises(ToolError):

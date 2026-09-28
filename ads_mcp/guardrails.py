@@ -21,7 +21,7 @@ account currency, and apply to every account unless overridden:
       max_daily_budget: 100             # per campaign budget
       max_total_daily_budget: 500       # all enabled campaigns in an account
       max_budget_increase_percent: 50   # per update_budget call
-      max_cpc_bid: 2.0                  # per keyword / ad group max CPC
+      max_cpc_bid: 2.0                  # per keyword / ad group max CPC bid
       accounts:
         "1234567890":
           max_total_daily_budget: 2000
@@ -31,7 +31,7 @@ cannot be bypassed through tool parameters.
 """
 
 from dataclasses import asdict, dataclass
-from typing import Any, Dict
+from typing import Any, Dict, Iterable, List, Tuple
 
 from fastmcp.exceptions import ToolError
 
@@ -177,7 +177,7 @@ def check_cpc_bid(limits: SpendLimits, bid: float) -> None:
 
 def check_effective_cpc_bids(
     limits: SpendLimits,
-    bids: Dict[str, float | None],
+    bids: Iterable[Tuple[str, float | None]],
     change: str,
     hint: str = "",
 ) -> None:
@@ -185,20 +185,72 @@ def check_effective_cpc_bids(
     e.g. enabling a paused keyword with a high bid.
 
     Args:
-        bids: The bids that would apply after the change, by keyword or ad group.
-        change: The change, for the message, e.g. "Enabling these keywords".
+        bids: (label, bid) of the bids that would apply after the change.
+        change: The change, for the message, e.g. "enabling these keywords".
         hint: How to proceed, appended to the message.
     """
     if limits.max_cpc_bid is None:
         return
-    too_high = {
-        label: bid
-        for label, bid in bids.items()
+    too_high = [
+        f"{label}: {bid}"
+        for label, bid in bids
         if bid and bid > limits.max_cpc_bid
-    }
+    ]
     if too_high:
         message = (
             f"Guardrail: {change} would make CPC bids above the configured "
-            f"max_cpc_bid of {limits.max_cpc_bid} apply: {too_high}."
+            f"max_cpc_bid of {limits.max_cpc_bid} apply ({'; '.join(too_high)})."
         )
         raise ToolError(f"{message} {hint}" if hint else message)
+
+
+# Enabled keywords and dynamic search ad webpages of Manual CPC campaigns,
+# the criteria whose CPC bids serve.
+_SERVING_BIDS_QUERY = (
+    "SELECT ad_group_criterion.criterion_id, ad_group_criterion.type, "
+    "ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type, "
+    "ad_group_criterion.effective_cpc_bid_micros, ad_group.id "
+    "FROM ad_group_criterion "
+    "WHERE campaign.bidding_strategy_type = 'MANUAL_CPC' "
+    "AND ad_group_criterion.type IN ('KEYWORD', 'WEBPAGE') "
+    "AND ad_group_criterion.negative = FALSE "
+    "AND ad_group_criterion.status = 'ENABLED'"
+)
+
+
+def check_serving_cpc_bids(
+    client,
+    customer_id: str,
+    limits: SpendLimits,
+    conditions: List[str],
+    change: str,
+    hint: str = "",
+) -> None:
+    """Refuses a change that would let stored CPC bids above max_cpc_bid serve,
+    e.g. enabling a Manual CPC campaign, ad group or ad.
+
+    Args:
+        conditions: GAQL conditions selecting the ad group criteria that the
+          change lets serve, e.g. ["ad_group.id = 1"].
+    """
+    if limits.max_cpc_bid is None:
+        return
+    rows = mutations.search(
+        client,
+        customer_id,
+        " AND ".join([_SERVING_BIDS_QUERY, *conditions]),
+    )
+    check_effective_cpc_bids(
+        limits,
+        [
+            (
+                mutations.criterion_label(row),
+                mutations.from_micros(
+                    row.get("ad_group_criterion.effective_cpc_bid_micros")
+                ),
+            )
+            for row in rows
+        ],
+        change,
+        hint,
+    )

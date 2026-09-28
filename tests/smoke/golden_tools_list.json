@@ -2475,7 +2475,7 @@
         "idempotentHint": true,
         "readOnlyHint": false
       },
-      "description": "Enables a campaign, so that it starts serving ads and SPENDING its budget.\n\nBefore enabling, review the campaign with get_campaign and the account's\ncurrent spend with get_spend_overview, and confirm with the user. Refused\nif it would break the spend guardrails configured on the server.",
+      "description": "Enables a campaign, so that it starts serving ads and SPENDING its budget.\n\nBefore enabling, review the campaign with get_campaign and the account's\ncurrent spend with get_spend_overview, and confirm with the user. Refused\nif it would break the spend guardrails configured on the server,\nincluding Manual CPC keyword bids above max_cpc_bid.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

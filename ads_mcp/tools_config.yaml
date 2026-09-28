@@ -14,9 +14,9 @@ namespaces:
   targeting: true
   conversions: true
 
-# Spend guardrails, enforced by the server on create_*_campaign, update_budget
-# and enable_campaign. Amounts are in each account's currency. Unset (null)
-# means no limit. See ads_mcp/guardrails.py.
+# Spend guardrails, enforced by the server on the tools that create campaigns,
+# change budgets or bids, or enable what serves. Amounts are in each account's
+# currency. Unset (null) means no limit. See ads_mcp/guardrails.py.
 guardrails:
   # Maximum daily budget of a single campaign.
   max_daily_budget: null
@@ -25,7 +25,8 @@ guardrails:
   # Maximum budget increase in a single update_budget call, in percent.
   max_budget_increase_percent: null
   # Maximum manual CPC bid (ad group or keyword) and Maximize Clicks bid
-  # ceiling. When set, Maximize Clicks requires a ceiling.
+  # ceiling. When set, Maximize Clicks requires a ceiling, and stored bids
+  # above it cannot be made to serve again.
   max_cpc_bid: null
   # Per-account overrides, keyed by customer ID:
   # accounts:

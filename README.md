@@ -161,9 +161,10 @@ never blocked.
 `max_cpc_bid` caps every CPC bid or bid ceiling a tool sets
 (`create_search_campaign`, `set_cpc_bids`, `set_bidding_strategy`,
 `add_keywords`). When it is set, Maximize Clicks needs a bid ceiling, and
-changes that would make stored bids above it apply are refused: switching to
-Manual CPC, enabling keywords or ad groups in Manual CPC campaigns, and adding
-keywords that would use an ad group default bid above it.
+changes that would let stored bids above it serve are refused: switching to
+Manual CPC; enabling a Manual CPC campaign, ad group, ad or keyword; creating
+an enabled ad; and adding keywords or clearing keyword bids where the ad
+group's default bid is above it.
 
 ```yaml
 guardrails:

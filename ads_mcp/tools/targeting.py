@@ -625,7 +625,7 @@ def add_keywords(
         )
         guardrails.check_effective_cpc_bids(
             limits,
-            {e["keyword"]: default_bid for e in added if "max_cpc" not in e},
+            [(e["keyword"], default_bid) for e in added if "max_cpc" not in e],
             "adding these keywords at the ad group's default bid",
             "Give keyword_bids at or below it, or lower the default bid "
             "with set_cpc_bids.",
@@ -759,7 +759,7 @@ def set_keyword_status(
 
     operations, changed, unchanged = [], [], []
     # Effective bids of keywords being enabled in Manual CPC campaigns.
-    enabled_bids: Dict[str, float | None] = {}
+    enabled_bids: List[tuple] = []
     for rn, row in selected.items():
         entry = {
             "keyword": mutations.format_keyword(
@@ -786,10 +786,13 @@ def set_keyword_status(
             status == "ENABLED"
             and row.get("campaign.bidding_strategy_type") == "MANUAL_CPC"
         ):
-            enabled_bids[
-                f"{entry['keyword']} in ad group {entry['ad_group_id']}"
-            ] = mutations.from_micros(
-                row.get("ad_group_criterion.effective_cpc_bid_micros")
+            enabled_bids.append(
+                (
+                    mutations.criterion_label(row),
+                    mutations.from_micros(
+                        row.get("ad_group_criterion.effective_cpc_bid_micros")
+                    ),
+                )
             )
     if enabled_bids:
         guardrails.check_effective_cpc_bids(

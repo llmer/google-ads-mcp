@@ -325,7 +325,7 @@ class TestAddKeywords(MutateToolTestCase):
             [_ad_group(default_bid=5.0)],
             [_keyword(7, 11, "running shoes", "EXACT")],
         ]
-        with self.assertRaisesRegex(ToolError, r"\{'trail shoes': 5.0\}"):
+        with self.assertRaisesRegex(ToolError, r"\(trail shoes: 5.0\)"):
             targeting.add_keywords(
                 "1", ["[running shoes]", "trail shoes"], ad_group_id=7
             )
@@ -484,7 +484,7 @@ class TestSetKeywordStatus(MutateToolTestCase):
                 ]
             ]
             with self.assertRaisesRegex(
-                ToolError, r"\{'shoes in ad group 7': 3.0\}"
+                ToolError, r"\(shoes in ad group 7: 3.0\)"
             ):
                 targeting.set_keyword_status(
                     "1", "ENABLED", keywords=["shoes", "boots"], ad_group_id=7
