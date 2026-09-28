@@ -89,7 +89,17 @@ class TestUpdateCampaignSettings(MutateToolTestCase):
         with self.assertRaises(ToolError):
             campaigns.update_campaign_settings("1", 5)
 
+    def _campaign(self, status="ENABLED", serving_status="SERVING"):
+        return [
+            {
+                "campaign.status": status,
+                "campaign.serving_status": serving_status,
+                "campaign.end_date_time": "2026-10-31 23:59:59",
+            }
+        ]
+
     def test_sets_name_networks_and_end_date(self):
+        self.search_results = [self._campaign()]
         result = campaigns.update_campaign_settings(
             "1",
             5,
@@ -118,12 +128,36 @@ class TestUpdateCampaignSettings(MutateToolTestCase):
                 "end_date_time",
             ],
         )
-        # Nothing else is read or changed.
-        self.assertEqual(self.queries, [])
+        # Only the campaign's status is read, for the end date.
+        [query] = self.queries
+        self.assertIn("campaign.serving_status", query)
         self.assertEqual(result["changed"]["end_date"], "2026-12-31")
+        self.assertEqual(
+            result["previous_end_date_time"], "2026-10-31 23:59:59"
+        )
         self.assertFalse(result["validate_only"])
 
+    def test_other_settings_read_nothing(self):
+        campaigns.update_campaign_settings("1", 5, name="Search - Generic")
+        self.assertEqual(self.queries, [])
+        [[op]] = self.mutate_calls()
+        self.assertEqual(
+            list(op.campaign_operation.update_mask.paths), ["name"]
+        )
+
+    def test_refuses_to_restart_an_ended_enabled_campaign(self):
+        for kwargs in [{"end_date": "2027-01-31"}, {"clear_end_date": True}]:
+            self.search_results = [self._campaign("ENABLED", "ENDED")]
+            with self.assertRaisesRegex(ToolError, "restart its spending"):
+                campaigns.update_campaign_settings("1", 5, **kwargs)
+        self.service.mutate.assert_not_called()
+        # A paused campaign only restarts through enable_campaign.
+        self.search_results = [self._campaign("PAUSED", "ENDED")]
+        campaigns.update_campaign_settings("1", 5, end_date="2027-01-31")
+        self.assertEqual(len(self.mutate_calls()), 1)
+
     def test_clear_end_date_masks_the_unset_field(self):
+        self.search_results = [self._campaign()]
         result = campaigns.update_campaign_settings(
             "1", 5, clear_end_date=True, validate_only=True
         )

@@ -57,7 +57,8 @@ them but never remove them.
     optimizing for installs, in-app actions or in-app value.
   - `update_budget`, `pause_campaign`, `enable_campaign`.
   - `update_campaign_settings`: Name, networks (Google Search, search
-    partners, Display expansion), end date, location targeting mode (presence
+    partners, Display expansion), end date (not for an enabled campaign that
+    has ended, which would restart it), location targeting mode (presence
     vs. presence or interest), device bid adjustments, and opting out of
     automatically created text assets and final URL expansion.
   - `set_bidding_strategy`: Switch a campaign to Manual CPC (optionally
@@ -160,8 +161,9 @@ never blocked.
 `max_cpc_bid` caps every CPC bid or bid ceiling a tool sets
 (`create_search_campaign`, `set_cpc_bids`, `set_bidding_strategy`,
 `add_keywords`). When it is set, Maximize Clicks needs a bid ceiling, and
-switching to Manual CPC is refused while ad group default bids above it would
-take effect, unless new ones are given.
+changes that would make stored bids above it apply are refused: switching to
+Manual CPC, enabling keywords or ad groups in Manual CPC campaigns, and adding
+keywords that would use an ad group default bid above it.
 
 ```yaml
 guardrails:

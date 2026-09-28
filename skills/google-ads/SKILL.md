@@ -115,6 +115,8 @@ numeric ID from the App Store URL for iOS (`apps.apple.com/.../id123456789` →
   (the result's `previous`) and the new one, and get a yes first.
 - Ad policy problems come back with their policy topics (e.g.
   `DESTINATION_NOT_WORKING`); fix the copy or URL instead of retrying.
+- A new end date for an enabled campaign that has ended is refused, since it
+  would restart spending: pause it, change the date, then `enable_campaign`.
 
 ## Targeting
 

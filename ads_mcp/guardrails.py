@@ -173,3 +173,32 @@ def check_cpc_bid(limits: SpendLimits, bid: float) -> None:
             f"Guardrail: a CPC bid of {bid} exceeds the configured "
             f"max_cpc_bid of {limits.max_cpc_bid}."
         )
+
+
+def check_effective_cpc_bids(
+    limits: SpendLimits,
+    bids: Dict[str, float | None],
+    change: str,
+    hint: str = "",
+) -> None:
+    """Refuses a change that makes stored CPC bids above max_cpc_bid apply,
+    e.g. enabling a paused keyword with a high bid.
+
+    Args:
+        bids: The bids that would apply after the change, by keyword or ad group.
+        change: The change, for the message, e.g. "Enabling these keywords".
+        hint: How to proceed, appended to the message.
+    """
+    if limits.max_cpc_bid is None:
+        return
+    too_high = {
+        label: bid
+        for label, bid in bids.items()
+        if bid and bid > limits.max_cpc_bid
+    }
+    if too_high:
+        message = (
+            f"Guardrail: {change} would make CPC bids above the configured "
+            f"max_cpc_bid of {limits.max_cpc_bid} apply: {too_high}."
+        )
+        raise ToolError(f"{message} {hint}" if hint else message)

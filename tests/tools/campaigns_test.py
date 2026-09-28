@@ -633,6 +633,15 @@ def _ad_group_bid(name, bid):
     }
 
 
+def _keyword_bid(ad_group, text, match_type, bid):
+    return {
+        "ad_group.name": ad_group,
+        "ad_group_criterion.keyword.text": text,
+        "ad_group_criterion.keyword.match_type": match_type,
+        "ad_group_criterion.cpc_bid_micros": int(bid * 1_000_000),
+    }
+
+
 class TestSetBiddingStrategy(MutateToolTestCase):
 
     def setUp(self):
@@ -799,14 +808,37 @@ class TestSetBiddingStrategy(MutateToolTestCase):
         ]:
             with self.assertRaisesRegex(ToolError, message):
                 campaigns.set_bidding_strategy("1", 5, **kwargs)
-        # Stale ad group bids above the limit would apply under MANUAL_CPC.
+        # Stored bids above the limit would apply again under MANUAL_CPC.
         self.search_results = [
             [_campaign_row("MAXIMIZE_CONVERSIONS")],
             [_ad_group_bid("Brand", 5.0), _ad_group_bid("Generic", 1.0)],
+            [],
         ]
-        with self.assertRaisesRegex(ToolError, r"\{'Brand': 5.0\}"):
+        with self.assertRaisesRegex(ToolError, r"\{'ad group Brand': 5.0\}"):
             campaigns.set_bidding_strategy("1", 5, "MANUAL_CPC")
+        # default_cpc replaces ad group bids, but keyword bids override it.
+        self.search_results = [
+            [_campaign_row("MAXIMIZE_CONVERSIONS")],
+            [_ad_group_bid("Brand", 5.0)],
+            [_keyword_bid("Brand", "running shoes", "EXACT", 10.0)],
+        ]
+        with self.assertRaisesRegex(
+            ToolError, r"'\[running shoes\] in ad group Brand': 10.0"
+        ):
+            campaigns.set_bidding_strategy(
+                "1", 5, "MANUAL_CPC", default_cpc=1.0
+            )
+        self.assertIn("ad_group_criterion.cpc_bid_micros", self.queries[-1])
+        self.assertIn("campaign.id = 5", self.queries[-1])
         self.service.mutate.assert_not_called()
+
+        self.search_results = [
+            [_campaign_row("MAXIMIZE_CONVERSIONS")],
+            [_ad_group_bid("Brand", 5.0)],
+            [_keyword_bid("Brand", "running shoes", "EXACT", 1.5)],
+        ]
+        campaigns.set_bidding_strategy("1", 5, "MANUAL_CPC", default_cpc=1.0)
+        self.assertEqual(len(self.mutate_calls()), 1)
 
         self.search_results = [[_campaign_row()]]
         campaigns.set_bidding_strategy(
@@ -1110,6 +1142,45 @@ class TestUpdateAdGroup(MutateToolTestCase):
             self.service.mutate.call_args.kwargs["request"].validate_only
         )
         self.assertTrue(result["validate_only"])
+
+    def test_enabling_in_manual_cpc_checks_keyword_bids(self):
+        def ad_group(status, strategy="MANUAL_CPC"):
+            return [
+                {
+                    "ad_group.status": status,
+                    "campaign.bidding_strategy_type": strategy,
+                }
+            ]
+
+        keywords = [
+            {
+                "ad_group_criterion.keyword.text": "running shoes",
+                "ad_group_criterion.keyword.match_type": "PHRASE",
+                "ad_group_criterion.effective_cpc_bid_micros": 3_000_000,
+            }
+        ]
+        with patch(
+            "ads_mcp.guardrails.get_limits",
+            return_value=guardrails.SpendLimits(max_cpc_bid=2.0),
+        ):
+            self.search_results = [ad_group("PAUSED"), keywords]
+            with self.assertRaisesRegex(ToolError, "'\"running shoes\"': 3.0"):
+                campaigns.update_ad_group("1", 7, status="ENABLED")
+            self.assertIn("ad_group.id = 7", self.queries[-1])
+            self.assertIn("status = 'ENABLED'", self.queries[-1])
+            self.service.mutate.assert_not_called()
+
+            # Smart Bidding ignores keyword bids; already enabled is a no-op.
+            for row in [
+                ad_group("PAUSED", "TARGET_SPEND"),
+                ad_group("ENABLED"),
+            ]:
+                self.search_results = [row]
+                campaigns.update_ad_group("1", 7, status="ENABLED")
+            # Pausing never checks bids.
+            self.search_results = [ad_group("ENABLED")]
+            campaigns.update_ad_group("1", 7, status="PAUSED")
+        self.assertEqual(len(self.mutate_calls()), 3)
 
     def test_rejects_empty_missing_and_removed(self):
         with self.assertRaises(ToolError):

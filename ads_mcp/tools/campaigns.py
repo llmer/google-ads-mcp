@@ -1373,8 +1373,12 @@ def update_campaign_settings(
           sites (needs target_google_search).
         target_content_network: Whether a Search campaign's ads also show on
           the Display Network (Display expansion).
-        end_date: The campaign's last day, YYYY-MM-DD, in the account time zone.
-        clear_end_date: Remove the end date, so the campaign runs indefinitely.
+        end_date: The campaign's last day, YYYY-MM-DD, in the account time
+          zone. Refused for an enabled campaign that has already ended, since
+          it would restart spending: pause it, change the date, then use
+          enable_campaign.
+        clear_end_date: Remove the end date, so the campaign runs
+          indefinitely. Refused like end_date for an ended enabled campaign.
         validate_only: If true, validates the request without changing anything.
         login_customer_id: Optional manager customer ID to use as the login-customer-id header.
 
@@ -1419,6 +1423,30 @@ def update_campaign_settings(
     campaign_rn = _campaign_rn(customer_id, campaign_id)
     operations: List[Tuple[Any, str]] = []
     changed: Dict[str, Any] = {}
+    previous_end_date_time = None
+    if end_date_time or clear_end_date:
+        rows = mutations.search(
+            client,
+            customer_id,
+            "SELECT campaign.status, campaign.serving_status, "
+            f"campaign.end_date_time FROM campaign WHERE campaign.id = {campaign_id}",
+        )
+        if not rows:
+            raise ToolError(f"Campaign {campaign_id} not found.")
+        row = rows[0]
+        # An ended campaign does not count towards the spend guardrails;
+        # giving it a later end date would start it again without them.
+        if (
+            row.get("campaign.status") == "ENABLED"
+            and row.get("campaign.serving_status") == "ENDED"
+        ):
+            raise ToolError(
+                f"Campaign {campaign_id} is enabled but has ended, so changing "
+                "its end date would restart its spending. Pause it with "
+                "pause_campaign, change the end date, then enable it with "
+                "enable_campaign, which checks the spend guardrails."
+            )
+        previous_end_date_time = row.get("campaign.end_date_time")
 
     paths: List[str] = []
     op = client.get_type("MutateOperation")
@@ -1517,11 +1545,11 @@ def update_campaign_settings(
         changed["device_bid_adjustments"] = adjustments
 
     mutations.mutate(client, customer_id, operations, validate_only)
-    return {
-        "campaign_id": campaign_id,
-        "changed": changed,
-        "validate_only": validate_only,
-    }
+    result: Dict[str, Any] = {"campaign_id": campaign_id, "changed": changed}
+    if end_date_time or clear_end_date:
+        result["previous_end_date_time"] = previous_end_date_time
+    result["validate_only"] = validate_only
+    return result
 
 
 @campaigns_mcp.tool(annotations=_UPDATE)
@@ -1778,7 +1806,8 @@ def set_bidding_strategy(
 
     default_cpc and cpc_bid_ceiling above the max_cpc_bid guardrail are
     refused. When that guardrail is set, MAXIMIZE_CLICKS needs a ceiling, and
-    MANUAL_CPC needs default_cpc if ad groups have default bids above it.
+    MANUAL_CPC is refused while stored bids above it would apply again:
+    keyword bids, or ad group default bids that default_cpc does not replace.
 
     Args:
         customer_id: The Google Ads customer ID.
@@ -1868,21 +1897,46 @@ def set_bidding_strategy(
             f"WHERE campaign.id = {campaign_id} "
             "AND ad_group.status != 'REMOVED'",
         )
-        if default_cpc is None and limits.max_cpc_bid is not None:
-            too_high = {}
-            for group in ad_groups:
-                bid = mutations.from_micros(
-                    group.get("ad_group.cpc_bid_micros")
+        if limits.max_cpc_bid is not None:
+            # Stored bids apply again under Manual CPC: ad group defaults
+            # (unless default_cpc replaces them) and keyword bids, which
+            # override the default.
+            bids = {}
+            if default_cpc is None:
+                bids = {
+                    f"ad group {g['ad_group.name']}": mutations.from_micros(
+                        g.get("ad_group.cpc_bid_micros")
+                    )
+                    for g in ad_groups
+                }
+            for row in mutations.search(
+                client,
+                customer_id,
+                "SELECT ad_group.name, ad_group_criterion.keyword.text, "
+                "ad_group_criterion.keyword.match_type, "
+                "ad_group_criterion.cpc_bid_micros FROM ad_group_criterion "
+                f"WHERE campaign.id = {campaign_id} "
+                "AND ad_group_criterion.type = 'KEYWORD' "
+                "AND ad_group_criterion.negative = FALSE "
+                "AND ad_group_criterion.status != 'REMOVED' "
+                "AND ad_group.status != 'REMOVED'",
+            ):
+                keyword = mutations.format_keyword(
+                    row["ad_group_criterion.keyword.text"],
+                    row["ad_group_criterion.keyword.match_type"],
                 )
-                if bid and bid > limits.max_cpc_bid:
-                    too_high[group["ad_group.name"]] = bid
-            if too_high:
-                raise ToolError(
-                    "Guardrail: with MANUAL_CPC these ad group default bids "
-                    "would apply, above the configured max_cpc_bid of "
-                    f"{limits.max_cpc_bid}: {too_high}. Give default_cpc to "
-                    "replace them."
+                bids[f"{keyword} in ad group {row['ad_group.name']}"] = (
+                    mutations.from_micros(
+                        row.get("ad_group_criterion.cpc_bid_micros")
+                    )
                 )
+            guardrails.check_effective_cpc_bids(
+                limits,
+                bids,
+                "switching to MANUAL_CPC",
+                "default_cpc replaces ad group default bids, but not keyword "
+                "bids.",
+            )
 
     field, type_name, subfield = _STRATEGIES[bidding_strategy]
     op = client.get_type("MutateOperation")
@@ -2258,8 +2312,9 @@ def update_ad_group(
 ) -> Dict[str, Any]:
     """Renames an ad group, or pauses or enables it. Never removes it.
 
-    Enabling an ad group does not enable its campaign. Change its default bid
-    with set_cpc_bids.
+    Enabling an ad group does not enable its campaign. In a Manual CPC
+    campaign, enabling is refused while its keywords' bids are above the
+    max_cpc_bid guardrail. Change its default bid with set_cpc_bids.
 
     Args:
         customer_id: The Google Ads customer ID.
@@ -2284,7 +2339,8 @@ def update_ad_group(
     rows = mutations.search(
         client,
         customer_id,
-        "SELECT ad_group.name, ad_group.status, campaign.id FROM ad_group "
+        "SELECT ad_group.name, ad_group.status, campaign.id, "
+        "campaign.bidding_strategy_type FROM ad_group "
         f"WHERE ad_group.id = {ad_group_id}",
     )
     if not rows:
@@ -2292,6 +2348,38 @@ def update_ad_group(
     row = rows[0]
     if row.get("ad_group.status") == "REMOVED":
         raise ToolError(f"Ad group {ad_group_id} was removed.")
+    if (
+        status == "ENABLED"
+        and row.get("ad_group.status") != "ENABLED"
+        and row.get("campaign.bidding_strategy_type") == "MANUAL_CPC"
+    ):
+        limits = guardrails.get_limits(customer_id)
+        if limits.max_cpc_bid is not None:
+            keywords = mutations.search(
+                client,
+                customer_id,
+                "SELECT ad_group_criterion.keyword.text, "
+                "ad_group_criterion.keyword.match_type, "
+                "ad_group_criterion.effective_cpc_bid_micros "
+                f"FROM ad_group_criterion WHERE ad_group.id = {ad_group_id} "
+                "AND ad_group_criterion.type = 'KEYWORD' "
+                "AND ad_group_criterion.negative = FALSE "
+                "AND ad_group_criterion.status = 'ENABLED'",
+            )
+            guardrails.check_effective_cpc_bids(
+                limits,
+                {
+                    mutations.format_keyword(
+                        k["ad_group_criterion.keyword.text"],
+                        k["ad_group_criterion.keyword.match_type"],
+                    ): mutations.from_micros(
+                        k.get("ad_group_criterion.effective_cpc_bid_micros")
+                    )
+                    for k in keywords
+                },
+                "enabling this ad group",
+                "Lower its bids first, e.g. with set_cpc_bids.",
+            )
 
     op = client.get_type("MutateOperation")
     ad_group = op.ad_group_operation.update

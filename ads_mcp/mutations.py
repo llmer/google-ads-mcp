@@ -191,6 +191,12 @@ def parse_keyword(keyword: str, default_match_type: str) -> Tuple[str, str]:
     return keyword.lower(), default_match_type
 
 
+def format_keyword(text: str, match_type: str) -> str:
+    """Writes a keyword in match type syntax, the reverse of parse_keyword
+    (with bare text for broad match)."""
+    return {"EXACT": f"[{text}]", "PHRASE": f'"{text}"'}.get(match_type, text)
+
+
 def update_mask(client: GoogleAdsClient, target, paths: Iterable[str]):
     """Sets the update_mask of an update operation to the given field paths."""
     client.copy_from(target, field_mask_pb2.FieldMask(paths=list(paths)))
@@ -345,8 +351,8 @@ def find_ad_group(
     """Returns the ad group to change: the given one, or the only ad group of
     the given campaign.
 
-    The row has the ad group's id, name and status, and its campaign's id,
-    name, channel type and bidding strategy type.
+    The row has the ad group's id, name, status and default CPC bid, and its
+    campaign's id, name, channel type and bidding strategy type.
     """
     if ad_group_id is None and campaign_id is None:
         raise ToolError(
@@ -362,9 +368,10 @@ def find_ad_group(
     rows = search(
         client,
         customer_id,
-        "SELECT ad_group.id, ad_group.name, ad_group.status, campaign.id, "
-        "campaign.name, campaign.advertising_channel_type, "
-        "campaign.bidding_strategy_type FROM ad_group "
+        "SELECT ad_group.id, ad_group.name, ad_group.status, "
+        "ad_group.cpc_bid_micros, campaign.id, campaign.name, "
+        "campaign.advertising_channel_type, campaign.bidding_strategy_type "
+        "FROM ad_group "
         f"WHERE {' AND '.join(conditions)}",
     )
     if ad_group_id is not None:

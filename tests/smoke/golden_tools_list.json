@@ -3034,7 +3034,7 @@
         "idempotentHint": true,
         "readOnlyHint": false
       },
-      "description": "Switches a campaign to a standard (non-portfolio) bidding strategy, or changes its target.\n\nThe strategy is replaced as a whole: a target that is not given is\ncleared, and a campaign using a portfolio strategy leaves it. Budget and\nstatus do not change. A new strategy restarts Smart Bidding's learning\nperiod, so confirm the change with the user first.\n\n  - MANUAL_CPC: you set the bids. default_cpc sets every ad group's\n    default max CPC in the same request; otherwise ad groups keep their\n    current bids (set_cpc_bids changes them later).\n  - MAXIMIZE_CLICKS: cpc_bid_ceiling caps the bid for each click.\n  - MAXIMIZE_CONVERSIONS: needs conversion tracking; optional target_cpa.\n  - MAXIMIZE_CONVERSION_VALUE: needs conversion values; optional target_roas.\n\ndefault_cpc and cpc_bid_ceiling above the max_cpc_bid guardrail are\nrefused. When that guardrail is set, MAXIMIZE_CLICKS needs a ceiling, and\nMANUAL_CPC needs default_cpc if ad groups have default bids above it.",
+      "description": "Switches a campaign to a standard (non-portfolio) bidding strategy, or changes its target.\n\nThe strategy is replaced as a whole: a target that is not given is\ncleared, and a campaign using a portfolio strategy leaves it. Budget and\nstatus do not change. A new strategy restarts Smart Bidding's learning\nperiod, so confirm the change with the user first.\n\n  - MANUAL_CPC: you set the bids. default_cpc sets every ad group's\n    default max CPC in the same request; otherwise ad groups keep their\n    current bids (set_cpc_bids changes them later).\n  - MAXIMIZE_CLICKS: cpc_bid_ceiling caps the bid for each click.\n  - MAXIMIZE_CONVERSIONS: needs conversion tracking; optional target_cpa.\n  - MAXIMIZE_CONVERSION_VALUE: needs conversion values; optional target_roas.\n\ndefault_cpc and cpc_bid_ceiling above the max_cpc_bid guardrail are\nrefused. When that guardrail is set, MAXIMIZE_CLICKS needs a ceiling, and\nMANUAL_CPC is refused while stored bids above it would apply again:\nkeyword bids, or ad group default bids that default_cpc does not replace.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -3262,7 +3262,7 @@
         "idempotentHint": true,
         "readOnlyHint": false
       },
-      "description": "Renames an ad group, or pauses or enables it. Never removes it.\n\nEnabling an ad group does not enable its campaign. Change its default bid\nwith set_cpc_bids.",
+      "description": "Renames an ad group, or pauses or enables it. Never removes it.\n\nEnabling an ad group does not enable its campaign. In a Manual CPC\ncampaign, enabling is refused while its keywords' bids are above the\nmax_cpc_bid guardrail. Change its default bid with set_cpc_bids.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -3459,7 +3459,7 @@
           },
           "clear_end_date": {
             "default": false,
-            "description": "Remove the end date, so the campaign runs indefinitely.",
+            "description": "Remove the end date, so the campaign runs\nindefinitely. Refused like end_date for an ended enabled campaign.",
             "type": "boolean"
           },
           "customer_id": {
@@ -3498,7 +3498,7 @@
               }
             ],
             "default": null,
-            "description": "The campaign's last day, YYYY-MM-DD, in the account time zone."
+            "description": "The campaign's last day, YYYY-MM-DD, in the account time\nzone. Refused for an enabled campaign that has already ended, since\nit would restart spending: pause it, change the date, then use\nenable_campaign."
           },
           "final_url_expansion": {
             "anyOf": [
@@ -4691,7 +4691,7 @@
               }
             ],
             "default": null,
-            "description": "Optional max CPC per keyword, keyed as in keywords, for\nManual CPC campaigns. Capped by the max_cpc_bid guardrail. Other\nkeywords use the ad group's default bid."
+            "description": "Optional max CPC per keyword, keyed as in keywords, for\nManual CPC campaigns. Other keywords use the ad group's default\nbid. Both are capped by the max_cpc_bid guardrail."
           },
           "keywords": {
             "description": "Keywords in match type syntax.",
@@ -5139,7 +5139,7 @@
         "idempotentHint": true,
         "readOnlyHint": false
       },
-      "description": "Pauses or enables ad group keywords. Never removes them.\n\nSelect keywords by text in match type syntax (\"[running shoes]\" exact,\n'\"running shoes\"' phrase, bare text broad) within ad_group_id or\ncampaign_id (all its ad groups), and/or by criterion ID. Criterion IDs\nare only unique within an ad group: give ad_group_id or campaign_id with\nthem, or write them as \"<ad group id>~<criterion id>\". Find IDs with the\nsearch tool (resource ad_group_criterion). If any keyword is not found,\nnothing changes. Enabling a keyword does not enable its ad group or\ncampaign.",
+      "description": "Pauses or enables ad group keywords. Never removes them.\n\nSelect keywords by text in match type syntax (\"[running shoes]\" exact,\n'\"running shoes\"' phrase, bare text broad) within ad_group_id or\ncampaign_id (all its ad groups), and/or by criterion ID. Criterion IDs\nare only unique within an ad group: give ad_group_id or campaign_id with\nthem, or write them as \"<ad group id>~<criterion id>\". Find IDs with the\nsearch tool (resource ad_group_criterion). If any keyword is not found,\nnothing changes. Enabling a keyword does not enable its ad group or\ncampaign, and in Manual CPC campaigns is refused while its bid is above\nthe max_cpc_bid guardrail.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

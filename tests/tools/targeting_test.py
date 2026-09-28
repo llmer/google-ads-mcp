@@ -176,19 +176,30 @@ class TestListAudiences(MutateToolTestCase):
         )
 
 
-def _ad_group(strategy="MANUAL_CPC", channel="SEARCH"):
+def _ad_group(strategy="MANUAL_CPC", channel="SEARCH", default_bid=1.0):
     return {
         "ad_group.id": 7,
         "ad_group.name": "Shoes",
         "ad_group.status": "ENABLED",
+        "ad_group.cpc_bid_micros": int(default_bid * 1_000_000),
         "campaign.id": 5,
         "campaign.advertising_channel_type": channel,
         "campaign.bidding_strategy_type": strategy,
     }
 
 
-def _keyword(ad_group_id, criterion_id, text, match_type, status="ENABLED"):
+def _keyword(
+    ad_group_id,
+    criterion_id,
+    text,
+    match_type,
+    status="ENABLED",
+    bid=1.0,
+    strategy="MANUAL_CPC",
+):
     return {
+        "ad_group_criterion.effective_cpc_bid_micros": int(bid * 1_000_000),
+        "campaign.bidding_strategy_type": strategy,
         "ad_group_criterion.resource_name": (
             f"customers/1/adGroupCriteria/{ad_group_id}~{criterion_id}"
         ),
@@ -307,6 +318,29 @@ class TestAddKeywords(MutateToolTestCase):
                 "1", ["[shoes]"], ad_group_id=7, keyword_bids={"shoes": 0.5}
             )
         self.assertEqual(self.queries, [])
+
+    def test_new_keywords_cannot_inherit_a_default_bid_over_the_limit(self):
+        self.limits = guardrails.SpendLimits(max_cpc_bid=2.0)
+        self.search_results = [
+            [_ad_group(default_bid=5.0)],
+            [_keyword(7, 11, "running shoes", "EXACT")],
+        ]
+        with self.assertRaisesRegex(ToolError, r"\{'trail shoes': 5.0\}"):
+            targeting.add_keywords(
+                "1", ["[running shoes]", "trail shoes"], ad_group_id=7
+            )
+        self.service.mutate.assert_not_called()
+        # Keyword bids within the limit, or Smart Bidding, are fine.
+        self.search_results = [[_ad_group(default_bid=5.0)], []]
+        targeting.add_keywords(
+            "1", ["trail shoes"], ad_group_id=7, keyword_bids={"trail shoes": 1}
+        )
+        self.search_results = [
+            [_ad_group("MAXIMIZE_CONVERSIONS", default_bid=5.0)],
+            [],
+        ]
+        targeting.add_keywords("1", ["trail shoes"], ad_group_id=7)
+        self.assertEqual(len(self.mutate_calls()), 2)
 
     def test_refuses_bids_under_smart_bidding_and_non_search(self):
         self.search_results = [[_ad_group("MAXIMIZE_CONVERSIONS")]]
@@ -436,6 +470,48 @@ class TestSetKeywordStatus(MutateToolTestCase):
                 "1", "REMOVED", keywords=["shoes"], ad_group_id=7
             )
         self.assertEqual(self.queries, [])
+
+    def test_enabling_checks_effective_bids_in_manual_cpc(self):
+        limits = patch(
+            "ads_mcp.guardrails.get_limits",
+            return_value=guardrails.SpendLimits(max_cpc_bid=2.0),
+        )
+        with limits as get_limits:
+            self.search_results = [
+                [
+                    _keyword(7, 11, "shoes", "BROAD", "PAUSED", bid=3.0),
+                    _keyword(7, 12, "boots", "BROAD", "PAUSED", bid=1.0),
+                ]
+            ]
+            with self.assertRaisesRegex(
+                ToolError, r"\{'shoes in ad group 7': 3.0\}"
+            ):
+                targeting.set_keyword_status(
+                    "1", "ENABLED", keywords=["shoes", "boots"], ad_group_id=7
+                )
+            self.service.mutate.assert_not_called()
+
+            # Smart Bidding sets its own bids.
+            self.search_results = [
+                [
+                    _keyword(
+                        7, 11, "shoes", "BROAD", "PAUSED", 3.0, "TARGET_SPEND"
+                    )
+                ]
+            ]
+            targeting.set_keyword_status(
+                "1", "ENABLED", keywords=["shoes"], ad_group_id=7
+            )
+            # Pausing never reads the limits.
+            get_limits.reset_mock()
+            self.search_results = [
+                [_keyword(7, 11, "shoes", "BROAD", "ENABLED", bid=3.0)]
+            ]
+            targeting.set_keyword_status(
+                "1", "PAUSED", keywords=["shoes"], ad_group_id=7
+            )
+            get_limits.assert_not_called()
+        self.assertEqual(len(self.mutate_calls()), 2)
 
     def test_validate_only(self):
         self.search_results = [[_keyword(7, 11, "shoes", "BROAD")]]

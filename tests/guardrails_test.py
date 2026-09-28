@@ -100,6 +100,23 @@ class TestChecks(unittest.TestCase):
         # Reductions are allowed even when already over the limit.
         guardrails.check_total_daily_budget(limits, {"b/1": 150.0}, "b/1", 120)
 
+    def test_check_effective_cpc_bids(self):
+        limits = guardrails.SpendLimits(max_cpc_bid=2.0)
+        guardrails.check_effective_cpc_bids(
+            limits, {"a": 2.0, "b": None, "c": 0}, "enabling"
+        )
+        with self.assertRaisesRegex(
+            ToolError,
+            r"enabling would make CPC bids above the configured max_cpc_bid "
+            r"of 2.0 apply: \{'b': 2.5\}. Lower them.",
+        ):
+            guardrails.check_effective_cpc_bids(
+                limits, {"a": 1.0, "b": 2.5}, "enabling", "Lower them."
+            )
+        guardrails.check_effective_cpc_bids(
+            guardrails.SpendLimits(), {"a": 100.0}, "enabling"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
