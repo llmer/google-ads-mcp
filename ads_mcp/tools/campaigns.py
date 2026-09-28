@@ -15,15 +15,18 @@
 """Tools for reading, creating and managing campaigns.
 
 New campaigns are always created PAUSED so that nothing spends money until
-the campaign is reviewed and explicitly enabled with `enable_campaign`.
+the campaign is reviewed and explicitly enabled with `enable_campaign`. No
+other tool enables a campaign.
 """
 
+import re
 import uuid
 from typing import Any, Dict, List, Literal, Tuple
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import BaseModel, Field
 
 import ads_mcp.guardrails as guardrails
 import ads_mcp.mutations as mutations
@@ -1941,5 +1944,378 @@ def set_bidding_strategy(
                 "set_cpc_bids (one ad group), or call this tool again with "
                 "default_cpc."
             )
+    result["validate_only"] = validate_only
+    return result
+
+
+class RsaHeadline(BaseModel):
+    """A responsive search ad headline, optionally pinned to a position."""
+
+    text: str = Field(description="Max 30 characters.")
+    pin: Literal["HEADLINE_1", "HEADLINE_2", "HEADLINE_3"] | None = Field(
+        default=None, description="Always show the headline in this position."
+    )
+
+
+class RsaDescription(BaseModel):
+    """A responsive search ad description, optionally pinned to a position."""
+
+    text: str = Field(description="Max 90 characters.")
+    pin: Literal["DESCRIPTION_1", "DESCRIPTION_2"] | None = Field(
+        default=None,
+        description="Always show the description in this position.",
+    )
+
+
+def _pinned_texts(
+    label: str,
+    items: List[Any] | None,
+    min_count: int,
+    max_count: int,
+    max_length: int,
+    positions: Tuple[str, ...],
+) -> List[Tuple[str, str | None]]:
+    """Validates ad texts given as strings or {text, pin} and returns
+    (text, pin) pairs, like check_texts."""
+    pairs = []
+    for item in items or []:
+        if isinstance(item, str):
+            text, pin = item, None
+        elif isinstance(item, dict):
+            text, pin = item.get("text"), item.get("pin")
+        else:
+            text, pin = item.text, item.pin
+        pairs.append(((text or "").strip(), pin))
+    texts = mutations.check_texts(
+        label, [text for text, _ in pairs], min_count, max_count, max_length
+    )
+    pins: Dict[str, str | None] = {}
+    for text, pin in pairs:
+        if not text:
+            continue
+        if pin is not None and pin not in positions:
+            raise ToolError(
+                f"{label}: pin must be one of {', '.join(positions)}, "
+                f"not {pin!r}."
+            )
+        if pins.setdefault(text, pin) != pin:
+            raise ToolError(f"{label}: {text!r} is given with two pins.")
+    return [(text, pins[text]) for text in texts]
+
+
+_DISPLAY_PATH_MAX = 15
+
+
+@campaigns_mcp.tool(annotations=_CREATE)
+def create_responsive_search_ad(
+    customer_id: str | int,
+    final_url: str,
+    headlines: List[str | RsaHeadline],
+    descriptions: List[str | RsaDescription],
+    ad_group_id: str | int | None = None,
+    campaign_id: str | int | None = None,
+    path1: str | None = None,
+    path2: str | None = None,
+    status: Literal["ENABLED", "PAUSED"] = "ENABLED",
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Adds a responsive search ad to an existing Search ad group.
+
+    Give ad_group_id, or campaign_id for a campaign with exactly one ad group.
+    Headlines and descriptions are strings, or {"text": ..., "pin": ...} to
+    pin one to a position (HEADLINE_1-3, DESCRIPTION_1-2). Pin sparingly:
+    pins limit the combinations Google can test.
+
+    Google reviews every new ad. Policy problems are reported with their
+    policy topics, e.g. DESTINATION_NOT_WORKING; fix the text or URL rather
+    than retrying. validate_only checks the ad, policy included, without
+    creating it.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        final_url: The landing page URL.
+        headlines: 3-15 headlines, max 30 characters each.
+        descriptions: 2-4 descriptions, max 90 characters each.
+        ad_group_id: The ad group to add the ad to.
+        campaign_id: A campaign with exactly one ad group, instead of ad_group_id.
+        path1: Optional display URL path, max 15 characters.
+        path2: Optional second display URL path, max 15 characters; needs path1.
+        status: ENABLED serves the ad once approved, if its ad group and
+          campaign are enabled (it never enables them). PAUSED creates it paused.
+        validate_only: If true, validates the request without creating anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The new ad's ID and resource name.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    headline_pairs = _pinned_texts(
+        "headlines",
+        headlines,
+        3,
+        15,
+        30,
+        ("HEADLINE_1", "HEADLINE_2", "HEADLINE_3"),
+    )
+    description_pairs = _pinned_texts(
+        "descriptions",
+        descriptions,
+        2,
+        4,
+        90,
+        ("DESCRIPTION_1", "DESCRIPTION_2"),
+    )
+    final_url = (final_url or "").strip()
+    if not final_url:
+        raise ToolError("final_url is required.")
+    for label, path in (("path1", path1), ("path2", path2)):
+        if path and len(path) > _DISPLAY_PATH_MAX:
+            raise ToolError(
+                f"{label} must be at most {_DISPLAY_PATH_MAX} characters: "
+                f"{path!r}."
+            )
+    if path2 and not path1:
+        raise ToolError("path2 needs path1.")
+    if status not in ("ENABLED", "PAUSED"):
+        raise ToolError("status must be ENABLED or PAUSED.")
+
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    group = mutations.find_ad_group(
+        client, customer_id, ad_group_id, campaign_id
+    )
+    if group.get("campaign.advertising_channel_type") != "SEARCH":
+        raise ToolError(
+            "Responsive search ads can only be added to Search campaigns."
+        )
+    ad_group_id = str(group["ad_group.id"])
+
+    op = client.get_type("MutateOperation")
+    ad_group_ad = op.ad_group_ad_operation.create
+    ad_group_ad.ad_group = mutations.resource_name(
+        customer_id, "adGroups", ad_group_id
+    )
+    ad_group_ad.status = client.enums.AdGroupAdStatusEnum[status]
+    ad_group_ad.ad.final_urls.append(final_url)
+    rsa = ad_group_ad.ad.responsive_search_ad
+    positions = client.enums.ServedAssetFieldTypeEnum
+    for pairs, target in (
+        (headline_pairs, rsa.headlines),
+        (description_pairs, rsa.descriptions),
+    ):
+        for text, pin in pairs:
+            ad_text = client.get_type("AdTextAsset")
+            ad_text.text = text
+            if pin:
+                ad_text.pinned_field = positions[pin]
+            target.append(ad_text)
+    if path1:
+        rsa.path1 = path1
+    if path2:
+        rsa.path2 = path2
+
+    results = mutations.mutate(
+        client,
+        customer_id,
+        [(op, f"responsive search ad in ad group {ad_group_id}")],
+        validate_only,
+    )
+    result: Dict[str, Any] = {
+        "ad_group_id": ad_group_id,
+        "ad_group": group.get("ad_group.name"),
+        "campaign_id": str(group.get("campaign.id")),
+        "status": status,
+    }
+    if validate_only:
+        result["message"] = "The ad is valid. Nothing was created."
+    else:
+        ad_rn = results["ad_group_ad"][0]
+        result["ad_id"] = mutations.last_id(ad_rn)
+        result["resource_name"] = ad_rn
+    result["validate_only"] = validate_only
+    return result
+
+
+@campaigns_mcp.tool(annotations=_UPDATE)
+def set_ad_status(
+    customer_id: str | int,
+    status: Literal["ENABLED", "PAUSED"],
+    ad_ids: List[str | int] | None = None,
+    ad_group_id: str | int | None = None,
+    resource_names: List[str] | None = None,
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Pauses or enables ads. Never removes them.
+
+    Identify ads by ad_ids within ad_group_id, and/or by ad_group_ad resource
+    names (customers/<customer id>/adGroupAds/<ad group id>~<ad id>). Find
+    them with the search tool: resource ad_group_ad, fields
+    ad_group_ad.resource_name, ad_group_ad.ad.id and ad_group_ad.status. If
+    any ad is not found, nothing changes. Enabling an ad does not enable its
+    ad group or campaign.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        status: ENABLED or PAUSED.
+        ad_ids: Ad IDs in ad_group_id.
+        ad_group_id: The ad group of ad_ids.
+        resource_names: ad_group_ad resource names.
+        validate_only: If true, validates the request without changing anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The ads changed and the ones already in that status.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    if status not in ("ENABLED", "PAUSED"):
+        raise ToolError("status must be ENABLED or PAUSED.")
+    wanted = []
+    if ad_ids:
+        if ad_group_id is None:
+            raise ToolError("ad_ids need ad_group_id, or use resource_names.")
+        group_id = mutations.parse_id(ad_group_id, "ad_group_id")
+        wanted += [
+            f"customers/{customer_id}/adGroupAds/{group_id}~"
+            f"{mutations.parse_id(ad_id, 'ad_id')}"
+            for ad_id in ad_ids
+        ]
+    for value in resource_names or []:
+        parts = mutations.parse_composite_id(
+            value, customer_id, "adGroupAds", "ad resource name"
+        )
+        if len(parts) != 2 or not all(re.fullmatch(r"\d+", p) for p in parts):
+            raise ToolError(
+                f"Invalid ad resource name '{value}'. Expected "
+                "customers/<customer id>/adGroupAds/<ad group id>~<ad id>."
+            )
+        wanted.append(f"customers/{customer_id}/adGroupAds/{'~'.join(parts)}")
+    wanted = list(dict.fromkeys(wanted))
+    if not wanted:
+        raise ToolError("Give ad_ids with ad_group_id, and/or resource_names.")
+
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    names = ", ".join(f"'{rn}'" for rn in wanted)
+    rows = mutations.search(
+        client,
+        customer_id,
+        "SELECT ad_group_ad.resource_name, ad_group_ad.status, "
+        "ad_group_ad.ad.id, ad_group_ad.ad.type, ad_group.id, campaign.id "
+        f"FROM ad_group_ad WHERE ad_group_ad.resource_name IN ({names})",
+    )
+    found = {row["ad_group_ad.resource_name"]: row for row in rows}
+    missing = [rn for rn in wanted if rn not in found]
+    if missing:
+        raise ToolError(f"Ads not found: {missing}. Nothing was changed.")
+    removed = [
+        rn for rn in wanted if found[rn]["ad_group_ad.status"] == "REMOVED"
+    ]
+    if removed:
+        raise ToolError(
+            f"Removed ads cannot be paused or enabled: {removed}. Nothing "
+            "was changed."
+        )
+
+    operations, changed, unchanged = [], [], []
+    for rn in wanted:
+        row = found[rn]
+        entry = {
+            "ad_id": str(row["ad_group_ad.ad.id"]),
+            "ad_group_id": str(row["ad_group.id"]),
+            "type": row.get("ad_group_ad.ad.type"),
+            "previous_status": row["ad_group_ad.status"],
+        }
+        if row["ad_group_ad.status"] == status:
+            unchanged.append(entry)
+            continue
+        op = client.get_type("MutateOperation")
+        ad_group_ad = op.ad_group_ad_operation.update
+        ad_group_ad.resource_name = rn
+        ad_group_ad.status = client.enums.AdGroupAdStatusEnum[status]
+        mutations.update_mask(
+            client, op.ad_group_ad_operation.update_mask, ["status"]
+        )
+        operations.append((op, f"ad {entry['ad_id']}"))
+        changed.append(entry)
+    if operations:
+        mutations.mutate(client, customer_id, operations, validate_only)
+    return {
+        "status": status,
+        "changed": changed,
+        "unchanged": unchanged,
+        "validate_only": validate_only,
+    }
+
+
+@campaigns_mcp.tool(annotations=_UPDATE)
+def update_ad_group(
+    customer_id: str | int,
+    ad_group_id: str | int,
+    name: str | None = None,
+    status: Literal["ENABLED", "PAUSED"] | None = None,
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Renames an ad group, or pauses or enables it. Never removes it.
+
+    Enabling an ad group does not enable its campaign. Change its default bid
+    with set_cpc_bids.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        ad_group_id: The ad group ID (see get_campaign).
+        name: A new name, unique within the campaign.
+        status: ENABLED or PAUSED.
+        validate_only: If true, validates the request without changing anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The previous and new name and status.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    ad_group_id = mutations.parse_id(ad_group_id, "ad_group_id")
+    if name is None and status is None:
+        raise ToolError("Nothing to update: give name and/or status.")
+    if name is not None and not name.strip():
+        raise ToolError("name must not be empty.")
+    if status is not None and status not in ("ENABLED", "PAUSED"):
+        raise ToolError("status must be ENABLED or PAUSED.")
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    rows = mutations.search(
+        client,
+        customer_id,
+        "SELECT ad_group.name, ad_group.status, campaign.id FROM ad_group "
+        f"WHERE ad_group.id = {ad_group_id}",
+    )
+    if not rows:
+        raise ToolError(f"Ad group {ad_group_id} not found.")
+    row = rows[0]
+    if row.get("ad_group.status") == "REMOVED":
+        raise ToolError(f"Ad group {ad_group_id} was removed.")
+
+    op = client.get_type("MutateOperation")
+    ad_group = op.ad_group_operation.update
+    ad_group.resource_name = mutations.resource_name(
+        customer_id, "adGroups", ad_group_id
+    )
+    paths = []
+    result: Dict[str, Any] = {
+        "ad_group_id": ad_group_id,
+        "campaign_id": str(row.get("campaign.id")),
+    }
+    if name is not None:
+        ad_group.name = name.strip()
+        paths.append("name")
+        result["previous_name"] = row.get("ad_group.name")
+        result["name"] = ad_group.name
+    if status is not None:
+        ad_group.status = client.enums.AdGroupStatusEnum[status]
+        paths.append("status")
+        result["previous_status"] = row.get("ad_group.status")
+        result["status"] = status
+    mutations.update_mask(client, op.ad_group_operation.update_mask, paths)
+    mutations.mutate(
+        client, customer_id, [(op, f"ad group {ad_group_id}")], validate_only
+    )
     result["validate_only"] = validate_only
     return result

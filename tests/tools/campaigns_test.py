@@ -22,7 +22,7 @@ from unittest.mock import patch
 
 import ads_mcp.guardrails as guardrails
 from ads_mcp.tools import campaigns
-from tests.tools.ads_fakes import MutateToolTestCase
+from tests.tools.ads_fakes import MutateToolTestCase, policy_exception
 
 _HEADLINES = ["Track spending", "Budget in minutes", "Free budget app"]
 _LONG_HEADLINES = ["The budgeting app that does the math for you"]
@@ -846,6 +846,284 @@ class TestSetBiddingStrategy(MutateToolTestCase):
             self.service.mutate.call_args.kwargs["request"].validate_only
         )
         self.assertTrue(result["validate_only"])
+
+
+def _search_ad_group(channel="SEARCH"):
+    return {
+        "ad_group.id": 7,
+        "ad_group.name": "Shoes",
+        "ad_group.status": "ENABLED",
+        "campaign.id": 5,
+        "campaign.advertising_channel_type": channel,
+        "campaign.bidding_strategy_type": "MANUAL_CPC",
+    }
+
+
+_RSA_HEADLINES = [
+    "Running Shoes Sale",
+    campaigns.RsaHeadline(text="Free Returns", pin="HEADLINE_1"),
+    {"text": "Shop Trail Shoes"},
+    "Running Shoes Sale",
+]
+_RSA_DESCRIPTIONS = [
+    campaigns.RsaDescription(text="Lightweight shoes.", pin="DESCRIPTION_2"),
+    "Order today, delivered this week.",
+]
+
+
+class TestCreateResponsiveSearchAd(MutateToolTestCase):
+
+    def _create(self, **kwargs):
+        args = dict(
+            customer_id="1",
+            final_url="https://example.com/shoes",
+            headlines=_RSA_HEADLINES,
+            descriptions=_RSA_DESCRIPTIONS,
+            ad_group_id=7,
+        )
+        args.update(kwargs)
+        return campaigns.create_responsive_search_ad(**args)
+
+    def test_creates_ad_with_pins_and_paths(self):
+        self.search_results = [[_search_ad_group()]]
+        result = self._create(path1="shoes", path2="sale", status="PAUSED")
+
+        [[op]] = self.mutate_calls()
+        ad_group_ad = op.ad_group_ad_operation.create
+        self.assertEqual(ad_group_ad.ad_group, "customers/1/adGroups/7")
+        self.assertEqual(ad_group_ad.status.name, "PAUSED")
+        self.assertEqual(
+            list(ad_group_ad.ad.final_urls), ["https://example.com/shoes"]
+        )
+        rsa = ad_group_ad.ad.responsive_search_ad
+        # Duplicates are dropped; pins stay with their text.
+        self.assertEqual(
+            [(h.text, h.pinned_field.name) for h in rsa.headlines],
+            [
+                ("Running Shoes Sale", "UNSPECIFIED"),
+                ("Free Returns", "HEADLINE_1"),
+                ("Shop Trail Shoes", "UNSPECIFIED"),
+            ],
+        )
+        self.assertEqual(
+            [(d.text, d.pinned_field.name) for d in rsa.descriptions],
+            [
+                ("Lightweight shoes.", "DESCRIPTION_2"),
+                ("Order today, delivered this week.", "UNSPECIFIED"),
+            ],
+        )
+        self.assertEqual((rsa.path1, rsa.path2), ("shoes", "sale"))
+        self.assertEqual(result["ad_id"], "1000")
+        self.assertEqual(result["ad_group_id"], "7")
+        self.assertIn("ad_group.id = 7", self.queries[0])
+
+    def test_uses_the_only_ad_group_of_a_campaign(self):
+        self.search_results = [[_search_ad_group()]]
+        self._create(ad_group_id=None, campaign_id=5)
+        [[op]] = self.mutate_calls()
+        self.assertEqual(
+            op.ad_group_ad_operation.create.ad_group, "customers/1/adGroups/7"
+        )
+        self.assertIn("campaign.id = 5", self.queries[0])
+
+    def test_validates_texts_paths_and_pins_before_any_request(self):
+        for kwargs, message in [
+            ({"headlines": ["One", "Two"]}, "between 3 and 15"),
+            ({"headlines": ["x" * 31, "Two", "Three"]}, "at most 30"),
+            ({"descriptions": ["Only one."]}, "between 2 and 4"),
+            ({"descriptions": ["x" * 91, "Two."]}, "at most 90"),
+            ({"path1": "x" * 16}, "path1 must be at most 15"),
+            ({"path2": "sale"}, "path2 needs path1"),
+            (
+                {"headlines": ["One", "Two", {"text": "Three", "pin": "X"}]},
+                "pin must be one of",
+            ),
+            (
+                {
+                    "headlines": [
+                        "One",
+                        "Two",
+                        "Three",
+                        {"text": "One", "pin": "HEADLINE_2"},
+                    ]
+                },
+                "two pins",
+            ),
+        ]:
+            with self.assertRaisesRegex(ToolError, message):
+                self._create(**kwargs)
+        self.assertEqual(self.queries, [])
+        self.service.mutate.assert_not_called()
+
+    def test_refuses_non_search_campaigns(self):
+        self.search_results = [[_search_ad_group("PERFORMANCE_MAX")]]
+        with self.assertRaisesRegex(ToolError, "Search campaigns"):
+            self._create()
+        self.service.mutate.assert_not_called()
+
+    def test_validate_only(self):
+        self.search_results = [[_search_ad_group()]]
+        result = self._create(validate_only=True)
+        self.assertTrue(
+            self.service.mutate.call_args.kwargs["request"].validate_only
+        )
+        self.assertTrue(result["validate_only"])
+        self.assertNotIn("ad_id", result)
+
+    def test_policy_errors_name_the_policy_topics(self):
+        exception = policy_exception(self.client)
+        element = type(exception.failure.errors[0].location).FieldPathElement(
+            field_name="mutate_operations", index=0
+        )
+        exception.failure.errors[0].location.field_path_elements.append(element)
+        self.service.mutate.side_effect = exception
+        self.search_results = [[_search_ad_group()]]
+        with self.assertRaises(ToolError) as ctx:
+            self._create()
+        message = str(ctx.exception)
+        self.assertIn("policy_finding_error.POLICY_FINDING", message)
+        self.assertIn(
+            "[operation: responsive search ad in ad group 7] "
+            "Policy: DESTINATION_MISMATCH (PROHIBITED): 'example.org'",
+            message,
+        )
+
+
+def _ad(ad_group_id, ad_id, status="ENABLED"):
+    return {
+        "ad_group_ad.resource_name": (
+            f"customers/1/adGroupAds/{ad_group_id}~{ad_id}"
+        ),
+        "ad_group_ad.status": status,
+        "ad_group_ad.ad.id": ad_id,
+        "ad_group_ad.ad.type": "RESPONSIVE_SEARCH_AD",
+        "ad_group.id": ad_group_id,
+        "campaign.id": 5,
+    }
+
+
+class TestSetAdStatus(MutateToolTestCase):
+
+    def test_pauses_by_ad_id_and_resource_name(self):
+        self.search_results = [[_ad(7, 11), _ad(8, 12), _ad(7, 13, "PAUSED")]]
+        result = campaigns.set_ad_status(
+            "1",
+            "PAUSED",
+            ad_ids=[11, "13"],
+            ad_group_id=7,
+            resource_names=["customers/1/adGroupAds/8~12", "7~11"],
+        )
+        self.assertIn(
+            "ad_group_ad.resource_name IN ('customers/1/adGroupAds/7~11', "
+            "'customers/1/adGroupAds/7~13', 'customers/1/adGroupAds/8~12')",
+            self.queries[0],
+        )
+        [operations] = self.mutate_calls()
+        self.assertEqual(
+            [
+                (
+                    op.ad_group_ad_operation._pb.WhichOneof("operation"),
+                    op.ad_group_ad_operation.update.resource_name,
+                    op.ad_group_ad_operation.update.status.name,
+                    list(op.ad_group_ad_operation.update_mask.paths),
+                )
+                for op in operations
+            ],
+            [
+                ("update", "customers/1/adGroupAds/7~11", "PAUSED", ["status"]),
+                ("update", "customers/1/adGroupAds/8~12", "PAUSED", ["status"]),
+            ],
+        )
+        self.assertEqual([a["ad_id"] for a in result["changed"]], ["11", "12"])
+        self.assertEqual(result["unchanged"][0]["ad_id"], "13")
+
+    def test_missing_or_removed_ads_change_nothing(self):
+        self.search_results = [[_ad(7, 11)]]
+        with self.assertRaisesRegex(ToolError, "7~12"):
+            campaigns.set_ad_status(
+                "1", "PAUSED", ad_ids=[11, 12], ad_group_id=7
+            )
+        self.search_results = [[_ad(7, 11, "REMOVED")]]
+        with self.assertRaisesRegex(ToolError, "Removed ads"):
+            campaigns.set_ad_status("1", "ENABLED", ad_ids=[11], ad_group_id=7)
+        self.service.mutate.assert_not_called()
+
+    def test_rejects_invalid_identifiers(self):
+        for kwargs in [
+            {"ad_ids": [11]},
+            {"resource_names": ["customers/2/adGroupAds/7~11"]},
+            {"resource_names": ["7~11~3"]},
+            {"resource_names": ["7~x' OR '1"]},
+            {},
+        ]:
+            with self.assertRaises(ToolError, msg=kwargs):
+                campaigns.set_ad_status("1", "PAUSED", **kwargs)
+        with self.assertRaises(ToolError):
+            campaigns.set_ad_status("1", "REMOVED", ad_ids=[11], ad_group_id=7)
+        self.assertEqual(self.queries, [])
+
+    def test_validate_only(self):
+        self.search_results = [[_ad(7, 11)]]
+        result = campaigns.set_ad_status(
+            "1", "PAUSED", ad_ids=[11], ad_group_id=7, validate_only=True
+        )
+        self.assertTrue(
+            self.service.mutate.call_args.kwargs["request"].validate_only
+        )
+        self.assertTrue(result["validate_only"])
+
+
+class TestUpdateAdGroup(MutateToolTestCase):
+
+    def test_renames_and_pauses(self):
+        self.search_results = [
+            [
+                {
+                    "ad_group.name": "Old",
+                    "ad_group.status": "ENABLED",
+                    "campaign.id": 5,
+                }
+            ]
+        ]
+        result = campaigns.update_ad_group(
+            "1", 7, name=" Trail shoes ", status="PAUSED"
+        )
+        [[op]] = self.mutate_calls()
+        update = op.ad_group_operation
+        self.assertEqual(update.update.resource_name, "customers/1/adGroups/7")
+        self.assertEqual(update.update.name, "Trail shoes")
+        self.assertEqual(update.update.status.name, "PAUSED")
+        self.assertEqual(list(update.update_mask.paths), ["name", "status"])
+        self.assertEqual(result["previous_name"], "Old")
+        self.assertEqual(result["previous_status"], "ENABLED")
+
+    def test_status_only_masks_status(self):
+        self.search_results = [[{"ad_group.status": "PAUSED"}]]
+        result = campaigns.update_ad_group(
+            "1", 7, status="ENABLED", validate_only=True
+        )
+        [[op]] = self.mutate_calls()
+        self.assertEqual(
+            list(op.ad_group_operation.update_mask.paths), ["status"]
+        )
+        self.assertTrue(
+            self.service.mutate.call_args.kwargs["request"].validate_only
+        )
+        self.assertTrue(result["validate_only"])
+
+    def test_rejects_empty_missing_and_removed(self):
+        with self.assertRaises(ToolError):
+            campaigns.update_ad_group("1", 7)
+        with self.assertRaises(ToolError):
+            campaigns.update_ad_group("1", 7, name=" ")
+        with self.assertRaises(ToolError):
+            campaigns.update_ad_group("1", 7, status="REMOVED")
+        with self.assertRaisesRegex(ToolError, "not found"):
+            campaigns.update_ad_group("1", 7, status="PAUSED")
+        self.search_results = [[{"ad_group.status": "REMOVED"}]]
+        with self.assertRaisesRegex(ToolError, "removed"):
+            campaigns.update_ad_group("1", 7, status="ENABLED")
+        self.service.mutate.assert_not_called()
 
 
 if __name__ == "__main__":

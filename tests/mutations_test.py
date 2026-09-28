@@ -20,15 +20,13 @@ from unittest.mock import MagicMock, patch
 from fastmcp.exceptions import ToolError
 from google.ads.googleads.errors import GoogleAdsException
 from google.ads.googleads.v25.errors.types.field_error import FieldErrorEnum
-from google.ads.googleads.v25.errors.types.policy_finding_error import (
-    PolicyFindingErrorEnum,
-)
-from google.ads.googleads.v25.errors.types.policy_violation_error import (
-    PolicyViolationErrorEnum,
-)
 
 import ads_mcp.mutations as mutations
-from tests.tools.ads_fakes import MutateToolTestCase, make_client
+from tests.tools.ads_fakes import (
+    MutateToolTestCase,
+    make_client,
+    policy_exception,
+)
 
 
 class TestMutationHelpers(unittest.TestCase):
@@ -176,38 +174,6 @@ class TestMutationHelpers(unittest.TestCase):
     def test_last_id(self):
         self.assertEqual(mutations.last_id("customers/1/adGroupAds/2~3"), "3")
         self.assertEqual(mutations.last_id("customers/1/campaigns/5"), "5")
-
-
-def policy_exception(client) -> GoogleAdsException:
-    """A failure as the API reports policy problems on an ad and a keyword."""
-    failure = client.get_type("GoogleAdsFailure")
-
-    finding = client.get_type("GoogleAdsError")
-    finding.message = "The resource has been disapproved."
-    finding.error_code.policy_finding_error = (
-        PolicyFindingErrorEnum.PolicyFindingError.POLICY_FINDING
-    )
-    entry = client.get_type("PolicyTopicEntry")
-    entry.topic = "DESTINATION_MISMATCH"
-    entry.type_ = client.enums.PolicyTopicEntryTypeEnum.PROHIBITED
-    evidence = client.get_type("PolicyTopicEvidence")
-    evidence.text_list.texts.append("example.org")
-    entry.evidences.append(evidence)
-    finding.details.policy_finding_details.policy_topic_entries.append(entry)
-    failure.errors.append(finding)
-
-    violation = client.get_type("GoogleAdsError")
-    violation.message = "A policy was violated."
-    violation.error_code.policy_violation_error = (
-        PolicyViolationErrorEnum.PolicyViolationError.POLICY_ERROR
-    )
-    details = violation.details.policy_violation_details
-    details.external_policy_name = "Healthcare and medicines"
-    details.key.policy_name = "PHARMACY"
-    details.key.violating_text = "cheap pills"
-    details.is_exemptible = True
-    failure.errors.append(violation)
-    return GoogleAdsException(None, None, failure, "req-2")
 
 
 class TestPolicyErrors(unittest.TestCase):
