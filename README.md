@@ -56,6 +56,8 @@ monetary amounts are given in the account currency (e.g. `25.5`), not micros.
   - `update_campaign_settings`: Location targeting mode (presence vs.
     presence or interest), device bid adjustments, and opting out of
     automatically created text assets and final URL expansion.
+  - `set_cpc_bids`: Manual CPC bids for a Search campaign's ad group
+    default and individual keywords, capped by the `max_cpc_bid` guardrail.
   - `set_auto_apply_recommendations`: Pause (or re-enable) auto-applied
     recommendations, which otherwise change keywords, match types, networks,
     bidding and ads without review and bypass the spend guardrails.
@@ -143,6 +145,7 @@ guardrails:
   max_daily_budget: 100             # per campaign
   max_total_daily_budget: 500       # all enabled campaigns in an account
   max_budget_increase_percent: 50   # per update_budget call
+  max_cpc_bid: 2.0                  # per keyword / ad group, set_cpc_bids
   accounts:                         # per-account overrides
     "1234567890":
       max_total_daily_budget: 2000

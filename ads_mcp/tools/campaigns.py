@@ -1498,3 +1498,117 @@ def set_auto_apply_recommendations(
         "unsupported_unknown_types": unsupported,
         "validate_only": validate_only,
     }
+
+
+@campaigns_mcp.tool(annotations=_UPDATE)
+def set_cpc_bids(
+    customer_id: str | int,
+    campaign_id: str | int,
+    default_cpc: float | None = None,
+    keyword_bids: Dict[str, float] | None = None,
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Sets manual CPC bids for a Search campaign's ad group and keywords.
+
+    For Manual CPC campaigns with one ad group (as created by
+    create_search_campaign). Bids are in the account currency. Higher bids
+    raise cost per click but never the budget; bids above the max_cpc_bid
+    guardrail are refused.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        campaign_id: The campaign ID.
+        default_cpc: The ad group's default max CPC, used by keywords without
+          their own bid.
+        keyword_bids: Keyword-level max CPC, keyed by keyword in match type
+          syntax: "[baby name app]" exact, '"baby name app"' phrase, bare text
+          broad. Use 0 to clear a keyword bid (fall back to default_cpc).
+        validate_only: If true, validates the request without changing anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The bids before and after, per ad group and keyword.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    campaign_id = mutations.parse_id(campaign_id, "campaign_id")
+    if default_cpc is None and not keyword_bids:
+        raise ToolError("Give default_cpc and/or keyword_bids.")
+    limits = guardrails.get_limits(customer_id)
+    for bid in [default_cpc, *(keyword_bids or {}).values()]:
+        if bid is None:
+            continue
+        if bid < 0:
+            raise ToolError("Bids cannot be negative.")
+        guardrails.check_cpc_bid(limits, bid)
+
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    groups = mutations.search(
+        client,
+        customer_id,
+        "SELECT ad_group.resource_name, ad_group.name, ad_group.cpc_bid_micros, "
+        "campaign.bidding_strategy_type FROM ad_group "
+        f"WHERE campaign.id = {campaign_id} AND ad_group.status != 'REMOVED'",
+    )
+    if len(groups) != 1:
+        raise ToolError(
+            f"Campaign {campaign_id} has {len(groups)} ad groups; this tool "
+            "handles campaigns with exactly one."
+        )
+    group = groups[0]
+    if group.get("campaign.bidding_strategy_type") != "MANUAL_CPC":
+        raise ToolError("Manual bids only apply to MANUAL_CPC campaigns.")
+
+    operations = []
+    result: Dict[str, Any] = {"ad_group": group["ad_group.name"], "keywords": {}}
+    if default_cpc is not None:
+        op = client.get_type("MutateOperation")
+        ag = op.ad_group_operation.update
+        ag.resource_name = group["ad_group.resource_name"]
+        ag.cpc_bid_micros = mutations.to_micros(default_cpc)
+        mutations.update_mask(client, op.ad_group_operation.update_mask, ["cpc_bid_micros"])
+        operations.append((op, "ad group default CPC"))
+        result["default_cpc"] = {
+            "before": mutations.from_micros(group.get("ad_group.cpc_bid_micros")),
+            "after": default_cpc,
+        }
+
+    if keyword_bids:
+        rows = mutations.search(
+            client,
+            customer_id,
+            "SELECT ad_group_criterion.resource_name, ad_group_criterion.keyword.text, "
+            "ad_group_criterion.keyword.match_type, ad_group_criterion.cpc_bid_micros "
+            f"FROM ad_group_criterion WHERE campaign.id = {campaign_id} "
+            "AND ad_group_criterion.type = 'KEYWORD' "
+            "AND ad_group_criterion.negative = FALSE "
+            "AND ad_group_criterion.status != 'REMOVED'",
+        )
+        existing = {
+            (
+                row["ad_group_criterion.keyword.text"].lower(),
+                row["ad_group_criterion.keyword.match_type"],
+            ): row
+            for row in rows
+        }
+        for keyword, bid in keyword_bids.items():
+            text, match_type = mutations.parse_keyword(keyword, "BROAD")
+            row = existing.get((text.lower(), match_type))
+            if row is None:
+                raise ToolError(f"Keyword {keyword!r} is not in campaign {campaign_id}.")
+            op = client.get_type("MutateOperation")
+            criterion = op.ad_group_criterion_operation.update
+            criterion.resource_name = row["ad_group_criterion.resource_name"]
+            criterion.cpc_bid_micros = mutations.to_micros(bid) if bid else 0
+            mutations.update_mask(
+                client, op.ad_group_criterion_operation.update_mask, ["cpc_bid_micros"]
+            )
+            operations.append((op, f"keyword {keyword}"))
+            result["keywords"][keyword] = {
+                "before": mutations.from_micros(row.get("ad_group_criterion.cpc_bid_micros")),
+                "after": bid or None,
+            }
+
+    mutations.mutate(client, customer_id, operations, validate_only)
+    result["validate_only"] = validate_only
+    return result

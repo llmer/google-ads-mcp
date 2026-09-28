@@ -209,3 +209,48 @@ class TestSetAutoApplyRecommendations(MutateToolTestCase):
         self.assertEqual([u.status.name for u in updates], ["PAUSED"])
         self.assertEqual(result["changed"], ["USE_BROAD_MATCH_KEYWORD"])
         self.assertEqual(result["unsupported_unknown_types"], 1)
+
+
+class TestSetCpcBids(MutateToolTestCase):
+
+    def _group(self, strategy="MANUAL_CPC"):
+        return {
+            "ad_group.resource_name": "customers/1/adGroups/7",
+            "ad_group.name": "App intent",
+            "ad_group.cpc_bid_micros": 250000,
+            "campaign.bidding_strategy_type": strategy,
+        }
+
+    def test_sets_default_and_keyword_bids(self):
+        self.search_results = [
+            [self._group()],
+            [{
+                "ad_group_criterion.resource_name": "customers/1/adGroupCriteria/7~9",
+                "ad_group_criterion.keyword.text": "baby name app",
+                "ad_group_criterion.keyword.match_type": "EXACT",
+                "ad_group_criterion.cpc_bid_micros": 0,
+            }],
+        ]
+        result = campaigns.set_cpc_bids("1", 5, default_cpc=0.35, keyword_bids={"[Baby Name App]": 0.45})
+        [operations] = self.mutate_calls()
+        [ag] = _ops(operations, "ad_group_operation", "update")
+        self.assertEqual(ag.cpc_bid_micros, 350000)
+        [kw] = _ops(operations, "ad_group_criterion_operation", "update")
+        self.assertEqual(kw.resource_name, "customers/1/adGroupCriteria/7~9")
+        self.assertEqual(kw.cpc_bid_micros, 450000)
+        self.assertEqual(result["default_cpc"], {"before": 0.25, "after": 0.35})
+
+    def test_refuses_bids_over_guardrail_and_smart_bidding(self):
+        from ads_mcp import guardrails
+        from unittest.mock import patch
+        with patch.object(guardrails, "get_limits", return_value=guardrails.SpendLimits(max_cpc_bid=1.0)):
+            with self.assertRaises(ToolError):
+                campaigns.set_cpc_bids("1", 5, default_cpc=1.5)
+        self.search_results = [[self._group("MAXIMIZE_CONVERSIONS")]]
+        with self.assertRaises(ToolError):
+            campaigns.set_cpc_bids("1", 5, default_cpc=0.3)
+
+    def test_unknown_keyword_is_an_error(self):
+        self.search_results = [[self._group()], []]
+        with self.assertRaises(ToolError):
+            campaigns.set_cpc_bids("1", 5, keyword_bids={"[nope]": 0.3})

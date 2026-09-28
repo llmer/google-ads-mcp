@@ -21,6 +21,7 @@ account currency, and apply to every account unless overridden:
       max_daily_budget: 100             # per campaign budget
       max_total_daily_budget: 500       # all enabled campaigns in an account
       max_budget_increase_percent: 50   # per update_budget call
+      max_cpc_bid: 2.0                  # per keyword / ad group max CPC
       accounts:
         "1234567890":
           max_total_daily_budget: 2000
@@ -42,6 +43,7 @@ _LIMIT_FIELDS = (
     "max_daily_budget",
     "max_total_daily_budget",
     "max_budget_increase_percent",
+    "max_cpc_bid",
 )
 
 
@@ -52,6 +54,7 @@ class SpendLimits:
     max_daily_budget: float | None = None
     max_total_daily_budget: float | None = None
     max_budget_increase_percent: float | None = None
+    max_cpc_bid: float | None = None
 
     def as_dict(self) -> Dict[str, float | None]:
         return asdict(self)
@@ -161,3 +164,12 @@ def check_total_daily_budget(
             "campaigns first."
         )
     return totals
+
+
+def check_cpc_bid(limits: SpendLimits, bid: float) -> None:
+    """Refuses a manual CPC bid above max_cpc_bid."""
+    if limits.max_cpc_bid is not None and bid > limits.max_cpc_bid:
+        raise ToolError(
+            f"Guardrail: a CPC bid of {bid} exceeds the configured "
+            f"max_cpc_bid of {limits.max_cpc_bid}."
+        )
