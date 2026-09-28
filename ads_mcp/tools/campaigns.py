@@ -173,6 +173,26 @@ def _targeting_operations(
     return operations
 
 
+def _check_click_bid(
+    limits: guardrails.SpendLimits, strategy: str, bid: float | None
+) -> None:
+    """Applies the max_cpc_bid guardrail to a manual CPC bid or a Maximize
+    Clicks bid ceiling.
+
+    Maximize Clicks without a ceiling could bid any amount per click, so it
+    needs one when max_cpc_bid is configured.
+    """
+    if bid is not None:
+        if bid <= 0:
+            raise ToolError("CPC bids must be greater than 0.")
+        guardrails.check_cpc_bid(limits, bid)
+    elif strategy == "MAXIMIZE_CLICKS" and limits.max_cpc_bid is not None:
+        raise ToolError(
+            f"Guardrail: max_cpc_bid is {limits.max_cpc_bid}, so MAXIMIZE_CLICKS "
+            "needs a CPC bid ceiling at or below it."
+        )
+
+
 def _set_bidding(
     client,
     campaign,
@@ -631,7 +651,8 @@ def create_search_campaign(
         target_roas: Optional target return on ad spend as a ratio (3.5 = 350%),
           for MAXIMIZE_CONVERSION_VALUE.
         max_cpc: Max cost per click. Required for MANUAL_CPC (the ad group's
-          default bid); optional bid ceiling for MAXIMIZE_CLICKS.
+          default bid); bid ceiling for MAXIMIZE_CLICKS, required there when
+          the max_cpc_bid guardrail is set. Capped by max_cpc_bid.
         ad_group_name: The ad group name. Defaults to "<name> ad group".
         path1: Optional display URL path, max 15 characters.
         path2: Optional second display URL path, max 15 characters.
@@ -652,6 +673,10 @@ def create_search_campaign(
         raise ToolError("At least one keyword is required.")
     if bidding_strategy == "MANUAL_CPC" and not max_cpc:
         raise ToolError("max_cpc is required for MANUAL_CPC bidding.")
+    if bidding_strategy in ("MANUAL_CPC", "MAXIMIZE_CLICKS"):
+        _check_click_bid(
+            guardrails.get_limits(customer_id), bidding_strategy, max_cpc
+        )
 
     client = utils.get_googleads_client(login_customer_id=login_customer_id)
     ids = mutations.TempIds()

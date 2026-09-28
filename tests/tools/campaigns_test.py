@@ -444,6 +444,41 @@ class TestSpendGuardrails(MutateToolTestCase):
             )
         self.service.mutate.assert_not_called()
 
+    def _create_search(self, **kwargs):
+        return campaigns.create_search_campaign(
+            "1",
+            "C",
+            10,
+            "https://example.com",
+            _HEADLINES,
+            _DESCRIPTIONS,
+            ["kw"],
+            **kwargs,
+        )
+
+    def test_create_refuses_cpc_above_max_cpc_bid(self):
+        self.limits = guardrails.SpendLimits(max_cpc_bid=2.0)
+        with self.assertRaisesRegex(ToolError, "max_cpc_bid of 2.0"):
+            self._create_search(bidding_strategy="MANUAL_CPC", max_cpc=2.5)
+        with self.assertRaisesRegex(ToolError, "max_cpc_bid of 2.0"):
+            self._create_search(bidding_strategy="MAXIMIZE_CLICKS", max_cpc=3)
+        self.service.mutate.assert_not_called()
+
+        self._create_search(bidding_strategy="MANUAL_CPC", max_cpc=2.0)
+        [operations] = self.mutate_calls()
+        [ad_group] = self.created(operations, "ad_group_operation")
+        self.assertEqual(ad_group.cpc_bid_micros, 2_000_000)
+
+    def test_create_maximize_clicks_needs_ceiling_under_max_cpc_bid(self):
+        self.limits = guardrails.SpendLimits(max_cpc_bid=2.0)
+        with self.assertRaisesRegex(ToolError, "needs a CPC bid ceiling"):
+            self._create_search(bidding_strategy="MAXIMIZE_CLICKS")
+        # Other strategies have no per-click limit to check.
+        self._create_search(bidding_strategy="MAXIMIZE_CONVERSIONS")
+        self.limits = guardrails.SpendLimits()
+        self._create_search(bidding_strategy="MAXIMIZE_CLICKS")
+        self.assertEqual(len(self.mutate_calls()), 2)
+
     def test_update_budget_refuses_large_increase(self):
         self.limits = guardrails.SpendLimits(max_budget_increase_percent=50)
         self.search_results = [[self._budget_row(10)]]

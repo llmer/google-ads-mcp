@@ -24,6 +24,9 @@ guardrails:
   max_total_daily_budget: null
   # Maximum budget increase in a single update_budget call, in percent.
   max_budget_increase_percent: null
+  # Maximum manual CPC bid (ad group or keyword) and Maximize Clicks bid
+  # ceiling. When set, Maximize Clicks requires a ceiling.
+  max_cpc_bid: null
   # Per-account overrides, keyed by customer ID:
   # accounts:
   #   "1234567890":

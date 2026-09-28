@@ -145,7 +145,7 @@ guardrails:
   max_daily_budget: 100             # per campaign
   max_total_daily_budget: 500       # all enabled campaigns in an account
   max_budget_increase_percent: 50   # per update_budget call
-  max_cpc_bid: 2.0                  # per keyword / ad group, set_cpc_bids
+  max_cpc_bid: 2.0                  # manual CPC bids, Maximize Clicks ceilings
   accounts:                         # per-account overrides
     "1234567890":
       max_total_daily_budget: 2000
