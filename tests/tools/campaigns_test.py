@@ -857,7 +857,7 @@ class TestSetBiddingStrategy(MutateToolTestCase):
                 "1", 5, "MANUAL_CPC", default_cpc=1.0
             )
         self.assertIn("ad_group_criterion.cpc_bid_micros", self.queries[-1])
-        self.assertIn("('KEYWORD', 'WEBPAGE')", self.queries[-1])
+        self.assertIn("ad_group_criterion.negative = FALSE", self.queries[-1])
         self.assertIn("campaign.id = 5", self.queries[-1])
         self.service.mutate.assert_not_called()
 
@@ -1241,7 +1241,7 @@ class TestUpdateAdGroup(MutateToolTestCase):
             ):
                 campaigns.update_ad_group("1", 7, status="ENABLED")
             for condition in [
-                "campaign.bidding_strategy_type = 'MANUAL_CPC'",
+                "campaign.bidding_strategy_type IN ('MANUAL_CPC', 'ENHANCED_CPC')",
                 "ad_group_criterion.status = 'ENABLED'",
                 "ad_group.id = 7",
                 "campaign.status = 'ENABLED'",

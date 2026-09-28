@@ -1923,8 +1923,8 @@ def set_bidding_strategy(
         )
         if limits.max_cpc_bid is not None:
             # Stored bids apply again under Manual CPC: ad group defaults
-            # (unless default_cpc replaces them), and keyword and dynamic
-            # search ad webpage bids, which override the default.
+            # (unless default_cpc replaces them), and the bids of keywords
+            # and other criteria, which override the default.
             bids = []
             if default_cpc is None:
                 bids = [
@@ -1944,7 +1944,6 @@ def set_bidding_strategy(
                 "ad_group_criterion.keyword.match_type, "
                 "ad_group_criterion.cpc_bid_micros, ad_group.id "
                 f"FROM ad_group_criterion WHERE campaign.id = {campaign_id} "
-                "AND ad_group_criterion.type IN ('KEYWORD', 'WEBPAGE') "
                 "AND ad_group_criterion.negative = FALSE "
                 "AND ad_group_criterion.status != 'REMOVED' "
                 "AND ad_group.status != 'REMOVED'",
@@ -1963,7 +1962,7 @@ def set_bidding_strategy(
                 bids,
                 "switching to MANUAL_CPC",
                 "default_cpc replaces ad group default bids, but not keyword "
-                "or webpage bids.",
+                "or other criterion bids.",
             )
 
     field, type_name, subfield = _STRATEGIES[bidding_strategy]

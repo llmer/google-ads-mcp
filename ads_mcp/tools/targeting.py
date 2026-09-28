@@ -619,7 +619,7 @@ def add_keywords(
             entry["max_cpc"] = bids[key]
         operations.append((op, f"keyword {label}"))
         added.append(entry)
-    if strategy == "MANUAL_CPC":
+    if strategy in guardrails.STORED_CPC_BID_STRATEGIES:
         default_bid = mutations.from_micros(
             group.get("ad_group.cpc_bid_micros")
         )
@@ -784,7 +784,8 @@ def set_keyword_status(
         changed.append(entry)
         if (
             status == "ENABLED"
-            and row.get("campaign.bidding_strategy_type") == "MANUAL_CPC"
+            and row.get("campaign.bidding_strategy_type")
+            in guardrails.STORED_CPC_BID_STRATEGIES
         ):
             enabled_bids.append(
                 (

@@ -139,7 +139,12 @@ class TestChecks(unittest.TestCase):
                 "enabling",
             )
         query = search.call_args.args[2]
-        self.assertIn("campaign.bidding_strategy_type = 'MANUAL_CPC'", query)
+        self.assertIn(
+            "campaign.bidding_strategy_type IN ('MANUAL_CPC', 'ENHANCED_CPC')",
+            query,
+        )
+        # Every positive criterion type with a bid counts, e.g. listing groups.
+        self.assertNotIn("ad_group_criterion.type IN", query)
         self.assertIn("ad_group_criterion.status = 'ENABLED'", query)
         self.assertTrue(query.endswith(" AND ad_group.id = 7"))
 
