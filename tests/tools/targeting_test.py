@@ -15,9 +15,11 @@
 """Tests for the targeting tools."""
 
 import unittest
+from unittest.mock import patch
 
 from fastmcp.exceptions import ToolError
 
+import ads_mcp.guardrails as guardrails
 from ads_mcp.tools import targeting
 from tests.tools.ads_fakes import MutateToolTestCase
 
@@ -172,6 +174,278 @@ class TestListAudiences(MutateToolTestCase):
             targeting.list_audiences("1"),
             [{"audience_id": "7", "name": "App users", "description": None}],
         )
+
+
+def _ad_group(strategy="MANUAL_CPC", channel="SEARCH"):
+    return {
+        "ad_group.id": 7,
+        "ad_group.name": "Shoes",
+        "ad_group.status": "ENABLED",
+        "campaign.id": 5,
+        "campaign.advertising_channel_type": channel,
+        "campaign.bidding_strategy_type": strategy,
+    }
+
+
+def _keyword(ad_group_id, criterion_id, text, match_type, status="ENABLED"):
+    return {
+        "ad_group_criterion.resource_name": (
+            f"customers/1/adGroupCriteria/{ad_group_id}~{criterion_id}"
+        ),
+        "ad_group_criterion.criterion_id": criterion_id,
+        "ad_group_criterion.keyword.text": text,
+        "ad_group_criterion.keyword.match_type": match_type,
+        "ad_group_criterion.status": status,
+        "ad_group.id": ad_group_id,
+    }
+
+
+class TestAddKeywords(MutateToolTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.limits = guardrails.SpendLimits()
+        limits_patch = patch(
+            "ads_mcp.guardrails.get_limits", side_effect=lambda _: self.limits
+        )
+        limits_patch.start()
+        self.addCleanup(limits_patch.stop)
+
+    def test_adds_new_keywords_and_skips_existing(self):
+        self.search_results = [
+            [_ad_group()],
+            [_keyword(7, 11, "Running Shoes", "EXACT", "PAUSED")],
+        ]
+        result = targeting.add_keywords(
+            "1",
+            ["[running shoes]", "trail shoes", '"Trail Shoes"', "trail shoes"],
+            campaign_id=5,
+            keyword_bids={'"trail shoes"': 1.2},
+        )
+
+        [operations] = self.mutate_calls()
+        created = self.created(operations, "ad_group_criterion_operation")
+        self.assertEqual(
+            [
+                (
+                    c.ad_group,
+                    c.keyword.text,
+                    c.keyword.match_type.name,
+                    c.status.name,
+                    c.cpc_bid_micros,
+                )
+                for c in created
+            ],
+            [
+                (
+                    "customers/1/adGroups/7",
+                    "trail shoes",
+                    "BROAD",
+                    "ENABLED",
+                    0,
+                ),
+                (
+                    "customers/1/adGroups/7",
+                    "trail shoes",
+                    "PHRASE",
+                    "ENABLED",
+                    1_200_000,
+                ),
+            ],
+        )
+        self.assertEqual(
+            result["added"],
+            [
+                {"keyword": "trail shoes", "criterion_id": "1000"},
+                {
+                    "keyword": '"trail shoes"',
+                    "max_cpc": 1.2,
+                    "criterion_id": "1001",
+                },
+            ],
+        )
+        self.assertEqual(
+            result["skipped_existing"],
+            [
+                {
+                    "keyword": "[running shoes]",
+                    "criterion_id": "11",
+                    "status": "PAUSED",
+                }
+            ],
+        )
+        self.assertIn("campaign.id = 5", self.queries[0])
+        self.assertIn("ad_group.id = 7", self.queries[1])
+        self.assertIn("ad_group_criterion.negative = FALSE", self.queries[1])
+
+    def test_bare_keywords_use_match_type(self):
+        self.search_results = [[_ad_group()], []]
+        targeting.add_keywords(
+            "1", ["running shoes"], ad_group_id=7, match_type="EXACT"
+        )
+        [operations] = self.mutate_calls()
+        [created] = self.created(operations, "ad_group_criterion_operation")
+        self.assertEqual(created.keyword.match_type.name, "EXACT")
+
+    def test_nothing_new_sends_no_request(self):
+        self.search_results = [
+            [_ad_group()],
+            [_keyword(7, 11, "running shoes", "BROAD")],
+        ]
+        result = targeting.add_keywords("1", ["running shoes"], ad_group_id=7)
+        self.service.mutate.assert_not_called()
+        self.assertEqual(result["added"], [])
+
+    def test_keyword_bids_are_capped_by_the_guardrail(self):
+        self.limits = guardrails.SpendLimits(max_cpc_bid=1.0)
+        with self.assertRaisesRegex(ToolError, "max_cpc_bid of 1.0"):
+            targeting.add_keywords(
+                "1", ["[shoes]"], ad_group_id=7, keyword_bids={"[shoes]": 1.5}
+            )
+        with self.assertRaisesRegex(ToolError, "not in keywords"):
+            targeting.add_keywords(
+                "1", ["[shoes]"], ad_group_id=7, keyword_bids={"shoes": 0.5}
+            )
+        self.assertEqual(self.queries, [])
+
+    def test_refuses_bids_under_smart_bidding_and_non_search(self):
+        self.search_results = [[_ad_group("MAXIMIZE_CONVERSIONS")]]
+        with self.assertRaisesRegex(ToolError, "MANUAL_CPC"):
+            targeting.add_keywords(
+                "1", ["[shoes]"], ad_group_id=7, keyword_bids={"[shoes]": 0.5}
+            )
+        self.search_results = [[_ad_group(channel="DISPLAY")]]
+        with self.assertRaisesRegex(ToolError, "Search campaigns"):
+            targeting.add_keywords("1", ["[shoes]"], ad_group_id=7)
+        with self.assertRaisesRegex(ToolError, "at least one keyword"):
+            targeting.add_keywords("1", [" "], ad_group_id=7)
+        self.service.mutate.assert_not_called()
+
+    def test_validate_only(self):
+        self.search_results = [[_ad_group()], []]
+        result = targeting.add_keywords(
+            "1", ["[shoes]"], ad_group_id=7, validate_only=True
+        )
+        self.assertTrue(
+            self.service.mutate.call_args.kwargs["request"].validate_only
+        )
+        self.assertEqual(result["added"], [{"keyword": "[shoes]"}])
+        self.assertTrue(result["validate_only"])
+
+
+class TestSetKeywordStatus(MutateToolTestCase):
+
+    def test_pauses_by_text_and_criterion_id_in_a_campaign(self):
+        self.search_results = [
+            [
+                _keyword(7, 11, "running shoes", "EXACT"),
+                _keyword(8, 11, "running shoes", "EXACT"),
+                _keyword(8, 12, "trail shoes", "BROAD", "PAUSED"),
+                _keyword(8, 13, "running shoes", "PHRASE"),
+            ]
+        ]
+        result = targeting.set_keyword_status(
+            "1",
+            "PAUSED",
+            keywords=["[Running Shoes]"],
+            criterion_ids=[12],
+            campaign_id=5,
+        )
+
+        [operations] = self.mutate_calls()
+        self.assertEqual(
+            [
+                op.ad_group_criterion_operation._pb.WhichOneof("operation")
+                for op in operations
+            ],
+            ["update", "update"],
+        )
+        self.assertEqual(
+            [
+                (
+                    op.ad_group_criterion_operation.update.resource_name,
+                    op.ad_group_criterion_operation.update.status.name,
+                    list(op.ad_group_criterion_operation.update_mask.paths),
+                )
+                for op in operations
+            ],
+            [
+                ("customers/1/adGroupCriteria/7~11", "PAUSED", ["status"]),
+                ("customers/1/adGroupCriteria/8~11", "PAUSED", ["status"]),
+            ],
+        )
+        self.assertEqual(
+            [c["ad_group_id"] for c in result["changed"]], ["7", "8"]
+        )
+        self.assertEqual(
+            result["unchanged"],
+            [
+                {
+                    "keyword": "trail shoes",
+                    "criterion_id": "12",
+                    "ad_group_id": "8",
+                    "previous_status": "PAUSED",
+                }
+            ],
+        )
+        self.assertIn("campaign.id = 5", self.queries[0])
+        self.assertIn("ad_group_criterion.status != 'REMOVED'", self.queries[0])
+
+    def test_composite_criterion_ids_need_no_scope(self):
+        self.search_results = [
+            [_keyword(8, 12, "trail shoes", "BROAD", "PAUSED")]
+        ]
+        result = targeting.set_keyword_status(
+            "1", "ENABLED", criterion_ids=["customers/1/adGroupCriteria/8~12"]
+        )
+        self.assertIn(
+            "ad_group_criterion.resource_name IN "
+            "('customers/1/adGroupCriteria/8~12')",
+            self.queries[0],
+        )
+        [[op]] = self.mutate_calls()
+        self.assertEqual(
+            op.ad_group_criterion_operation.update.status.name, "ENABLED"
+        )
+        self.assertEqual(result["changed"][0]["previous_status"], "PAUSED")
+
+    def test_missing_keyword_changes_nothing(self):
+        self.search_results = [[_keyword(7, 11, "running shoes", "EXACT")]]
+        with self.assertRaisesRegex(ToolError, r"\['running shoes'\]"):
+            targeting.set_keyword_status(
+                "1",
+                "PAUSED",
+                keywords=["[running shoes]", "running shoes"],
+                ad_group_id=7,
+            )
+        self.service.mutate.assert_not_called()
+
+    def test_rejects_ambiguous_or_invalid_ids(self):
+        for kwargs in [
+            {"keywords": ["shoes"]},
+            {"criterion_ids": [12]},
+            {"criterion_ids": ["12 OR 1=1"], "ad_group_id": 7},
+            {"criterion_ids": ["customers/2/adGroupCriteria/8~12"]},
+            {"criterion_ids": ["8~12~3"]},
+            {"ad_group_id": 7},
+        ]:
+            with self.assertRaises(ToolError, msg=kwargs):
+                targeting.set_keyword_status("1", "PAUSED", **kwargs)
+        with self.assertRaises(ToolError):
+            targeting.set_keyword_status(
+                "1", "REMOVED", keywords=["shoes"], ad_group_id=7
+            )
+        self.assertEqual(self.queries, [])
+
+    def test_validate_only(self):
+        self.search_results = [[_keyword(7, 11, "shoes", "BROAD")]]
+        result = targeting.set_keyword_status(
+            "1", "PAUSED", keywords=["shoes"], ad_group_id=7, validate_only=True
+        )
+        self.assertTrue(
+            self.service.mutate.call_args.kwargs["request"].validate_only
+        )
+        self.assertTrue(result["validate_only"])
 
 
 if __name__ == "__main__":

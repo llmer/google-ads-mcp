@@ -12,15 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tools for campaign targeting: locations, languages, negative keywords and
+"""Tools for targeting: locations, languages, keywords, negative keywords and
 Performance Max audience signals.
 
-The set_* tools take a `mode`:
+The set_* tools for campaign criteria and signals take a `mode`:
   - "add" (default): adds the given items, keeping existing ones.
   - "remove": removes the given items.
   - "replace": makes the targeting match exactly the given items.
+
+Ad group keywords are added with add_keywords and paused or enabled with
+set_keyword_status; no tool removes them.
 """
 
+import re
 from typing import Any, Callable, Dict, List, Literal
 
 from fastmcp import FastMCP
@@ -28,6 +32,7 @@ from fastmcp.exceptions import ToolError
 from google.ads.googleads.errors import GoogleAdsException
 from mcp.types import ToolAnnotations
 
+import ads_mcp.guardrails as guardrails
 import ads_mcp.mutations as mutations
 import ads_mcp.utils as utils
 
@@ -37,6 +42,10 @@ Mode = Literal["add", "remove", "replace"]
 
 _UPDATE = ToolAnnotations(
     readOnlyHint=False, destructiveHint=True, idempotentHint=True
+)
+# Adds or changes items without removing any.
+_NON_DESTRUCTIVE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True
 )
 
 
@@ -477,3 +486,293 @@ def set_audience_signals(
         "asset_group_signal_operation",
         validate_only,
     )
+
+
+# Positive, non-removed ad group keywords.
+_KEYWORD_QUERY = (
+    "SELECT ad_group_criterion.resource_name, ad_group_criterion.criterion_id, "
+    "ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type, "
+    "ad_group_criterion.status, ad_group.id FROM ad_group_criterion "
+    "WHERE ad_group_criterion.type = 'KEYWORD' "
+    "AND ad_group_criterion.negative = FALSE "
+    "AND ad_group_criterion.status != 'REMOVED'"
+)
+
+
+def _keyword_key(row: Dict[str, Any]) -> tuple:
+    return (
+        row["ad_group_criterion.keyword.text"].lower(),
+        row["ad_group_criterion.keyword.match_type"],
+    )
+
+
+def _keyword_label(text: str, match_type: str) -> str:
+    """Writes a keyword in match type syntax, e.g. [running shoes]."""
+    return {"EXACT": f"[{text}]", "PHRASE": f'"{text}"'}.get(match_type, text)
+
+
+@targeting_mcp.tool(annotations=_NON_DESTRUCTIVE)
+def add_keywords(
+    customer_id: str | int,
+    keywords: List[str],
+    ad_group_id: str | int | None = None,
+    campaign_id: str | int | None = None,
+    match_type: Literal["BROAD", "PHRASE", "EXACT"] = "BROAD",
+    keyword_bids: Dict[str, float] | None = None,
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Adds keywords to an existing Search ad group, skipping keywords it already has.
+
+    Give ad_group_id, or campaign_id for a campaign with exactly one ad group.
+    Keyword syntax: "[running shoes]" is exact match, '"running shoes"' is
+    phrase match, and bare text uses match_type. A keyword with the same text
+    and match type as an existing one (enabled or paused) is skipped and
+    reported; set_keyword_status re-enables paused ones. New keywords are
+    enabled, so in an enabled campaign they can start spending right away.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        keywords: Keywords in match type syntax.
+        ad_group_id: The ad group to add the keywords to.
+        campaign_id: A campaign with exactly one ad group, instead of ad_group_id.
+        match_type: Match type of keywords written without [ ] or quotes.
+        keyword_bids: Optional max CPC per keyword, keyed as in keywords, for
+          Manual CPC campaigns. Capped by the max_cpc_bid guardrail. Other
+          keywords use the ad group's default bid.
+        validate_only: If true, validates the request without changing anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The keywords added and the ones skipped because they already exist.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    # (text, match type) -> keyword as given, in order and without duplicates.
+    wanted: Dict[tuple, str] = {}
+    for keyword in keywords or []:
+        if not keyword or not keyword.strip():
+            continue
+        key = mutations.parse_keyword(keyword, match_type)
+        if not key[0]:
+            raise ToolError(f"Invalid keyword {keyword!r}.")
+        wanted.setdefault(key, keyword)
+    if not wanted:
+        raise ToolError("Give at least one keyword.")
+    bids: Dict[tuple, float] = {}
+    if keyword_bids:
+        limits = guardrails.get_limits(customer_id)
+        for keyword, bid in keyword_bids.items():
+            key = mutations.parse_keyword(keyword, match_type)
+            if key not in wanted:
+                raise ToolError(
+                    f"keyword_bids: {keyword!r} is not in keywords."
+                )
+            if bid is None or bid <= 0:
+                raise ToolError("Keyword bids must be greater than 0.")
+            guardrails.check_cpc_bid(limits, bid)
+            bids[key] = bid
+
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    group = mutations.find_ad_group(
+        client, customer_id, ad_group_id, campaign_id
+    )
+    if group.get("campaign.advertising_channel_type") != "SEARCH":
+        raise ToolError("Keywords can only be added to Search campaigns.")
+    strategy = group.get("campaign.bidding_strategy_type")
+    if bids and strategy != "MANUAL_CPC":
+        raise ToolError(
+            f"Keyword bids only apply to MANUAL_CPC campaigns, not {strategy}."
+        )
+    ad_group_id = str(group["ad_group.id"])
+    existing = {
+        _keyword_key(row): row
+        for row in mutations.search(
+            client,
+            customer_id,
+            f"{_KEYWORD_QUERY} AND ad_group.id = {ad_group_id}",
+        )
+    }
+
+    ad_group_rn = mutations.resource_name(customer_id, "adGroups", ad_group_id)
+    match_types = client.enums.KeywordMatchTypeEnum
+    operations, added, skipped = [], [], []
+    for key in wanted:
+        text, keyword_match_type = key
+        label = _keyword_label(text, keyword_match_type)
+        row = existing.get(key)
+        if row:
+            skipped.append(
+                {
+                    "keyword": label,
+                    "criterion_id": str(row["ad_group_criterion.criterion_id"]),
+                    "status": row["ad_group_criterion.status"],
+                }
+            )
+            continue
+        op = client.get_type("MutateOperation")
+        criterion = op.ad_group_criterion_operation.create
+        criterion.ad_group = ad_group_rn
+        criterion.status = client.enums.AdGroupCriterionStatusEnum.ENABLED
+        criterion.keyword.text = text
+        criterion.keyword.match_type = match_types[keyword_match_type]
+        entry: Dict[str, Any] = {"keyword": label}
+        if key in bids:
+            criterion.cpc_bid_micros = mutations.to_micros(bids[key])
+            entry["max_cpc"] = bids[key]
+        operations.append((op, f"keyword {label}"))
+        added.append(entry)
+
+    if operations:
+        results = mutations.mutate(
+            client, customer_id, operations, validate_only
+        )
+        for entry, rn in zip(added, results.get("ad_group_criterion", [])):
+            entry["criterion_id"] = mutations.last_id(rn)
+    return {
+        "ad_group_id": ad_group_id,
+        "ad_group": group.get("ad_group.name"),
+        "campaign_id": str(group.get("campaign.id")),
+        "added": added,
+        "skipped_existing": skipped,
+        "validate_only": validate_only,
+    }
+
+
+@targeting_mcp.tool(annotations=_NON_DESTRUCTIVE)
+def set_keyword_status(
+    customer_id: str | int,
+    status: Literal["ENABLED", "PAUSED"],
+    keywords: List[str] | None = None,
+    criterion_ids: List[str | int] | None = None,
+    ad_group_id: str | int | None = None,
+    campaign_id: str | int | None = None,
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Pauses or enables ad group keywords. Never removes them.
+
+    Select keywords by text in match type syntax ("[running shoes]" exact,
+    '"running shoes"' phrase, bare text broad) within ad_group_id or
+    campaign_id (all its ad groups), and/or by criterion ID. Criterion IDs
+    are only unique within an ad group: give ad_group_id or campaign_id with
+    them, or write them as "<ad group id>~<criterion id>". Find IDs with the
+    search tool (resource ad_group_criterion). If any keyword is not found,
+    nothing changes. Enabling a keyword does not enable its ad group or
+    campaign.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        status: ENABLED or PAUSED.
+        keywords: Keywords in match type syntax.
+        criterion_ids: Keyword criterion IDs, "<ad group id>~<criterion id>"
+          pairs, or ad_group_criterion resource names.
+        ad_group_id: Only change keywords of this ad group.
+        campaign_id: Only change keywords of this campaign.
+        validate_only: If true, validates the request without changing anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The keywords changed and the ones already in that status.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    if status not in ("ENABLED", "PAUSED"):
+        raise ToolError("status must be ENABLED or PAUSED.")
+    keys = list(
+        dict.fromkeys(
+            mutations.parse_keyword(k, "BROAD")
+            for k in keywords or []
+            if k and k.strip()
+        )
+    )
+    plain_ids, criterion_rns = [], []
+    for value in criterion_ids or []:
+        parts = mutations.parse_composite_id(
+            value, customer_id, "adGroupCriteria", "criterion ID"
+        )
+        if len(parts) > 2 or not all(re.fullmatch(r"\d+", p) for p in parts):
+            raise ToolError(f"Invalid criterion ID '{value}'.")
+        if len(parts) == 2:
+            criterion_rns.append(
+                f"customers/{customer_id}/adGroupCriteria/{parts[0]}~{parts[1]}"
+            )
+        else:
+            plain_ids.append(parts[0])
+    if not (keys or plain_ids or criterion_rns):
+        raise ToolError("Give keywords and/or criterion_ids.")
+
+    conditions = []
+    if ad_group_id is not None:
+        conditions.append(
+            f"ad_group.id = {mutations.parse_id(ad_group_id, 'ad_group_id')}"
+        )
+    if campaign_id is not None:
+        conditions.append(
+            f"campaign.id = {mutations.parse_id(campaign_id, 'campaign_id')}"
+        )
+    if not conditions:
+        if keys or plain_ids:
+            raise ToolError(
+                "Give ad_group_id or campaign_id to find keywords by text or "
+                "by criterion ID alone."
+            )
+        names = ", ".join(f"'{rn}'" for rn in criterion_rns)
+        conditions.append(f"ad_group_criterion.resource_name IN ({names})")
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    rows = mutations.search(
+        client, customer_id, f"{_KEYWORD_QUERY} AND {' AND '.join(conditions)}"
+    )
+
+    by_key: Dict[tuple, List[Dict[str, Any]]] = {}
+    by_id: Dict[str, List[Dict[str, Any]]] = {}
+    by_rn: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        by_key.setdefault(_keyword_key(row), []).append(row)
+        by_id.setdefault(
+            str(row["ad_group_criterion.criterion_id"]), []
+        ).append(row)
+        by_rn[row["ad_group_criterion.resource_name"]] = [row]
+    # (what was asked for, the keywords it matches)
+    requested = [(_keyword_label(*k), by_key.get(k, [])) for k in keys]
+    requested += [(f"criterion {c}", by_id.get(c, [])) for c in plain_ids]
+    requested += [(rn, by_rn.get(rn, [])) for rn in criterion_rns]
+    missing = [label for label, found in requested if not found]
+    if missing:
+        raise ToolError(
+            f"Keywords not found (or removed): {missing}. Nothing was changed."
+        )
+    selected: Dict[str, Dict[str, Any]] = {}
+    for _, found in requested:
+        for row in found:
+            selected.setdefault(row["ad_group_criterion.resource_name"], row)
+
+    operations, changed, unchanged = [], [], []
+    for rn, row in selected.items():
+        entry = {
+            "keyword": _keyword_label(
+                row["ad_group_criterion.keyword.text"],
+                row["ad_group_criterion.keyword.match_type"],
+            ),
+            "criterion_id": str(row["ad_group_criterion.criterion_id"]),
+            "ad_group_id": str(row["ad_group.id"]),
+            "previous_status": row["ad_group_criterion.status"],
+        }
+        if row["ad_group_criterion.status"] == status:
+            unchanged.append(entry)
+            continue
+        op = client.get_type("MutateOperation")
+        criterion = op.ad_group_criterion_operation.update
+        criterion.resource_name = rn
+        criterion.status = client.enums.AdGroupCriterionStatusEnum[status]
+        mutations.update_mask(
+            client, op.ad_group_criterion_operation.update_mask, ["status"]
+        )
+        operations.append((op, f"keyword {entry['keyword']}"))
+        changed.append(entry)
+    if operations:
+        mutations.mutate(client, customer_id, operations, validate_only)
+    return {
+        "status": status,
+        "changed": changed,
+        "unchanged": unchanged,
+        "validate_only": validate_only,
+    }
