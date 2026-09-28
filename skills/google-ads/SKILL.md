@@ -21,10 +21,11 @@ server prefix too (`mcp__google-ads__...`).
 | What is running and spending | `get_spend_overview`, `list_campaigns`, `get_campaign` |
 | Anything else, custom reports | `search` (GAQL), `get_resource_metadata` for field names |
 | Create campaigns | `create_search_campaign`, `create_pmax_campaign`, `create_app_campaign` |
-| Change campaigns | `update_budget`, `pause_campaign`, `enable_campaign` |
-| Creatives | `list_assets`, `upload_image`, `upload_logo`, `create_text_assets`, `create_youtube_video_assets`, `create_asset_group`, `get_asset_group` |
+| Change campaigns | `update_budget`, `pause_campaign`, `enable_campaign`, `update_campaign_settings`, `set_bidding_strategy`, `set_cpc_bids`, `set_auto_apply_recommendations` |
+| Edit Search ad groups, ads and keywords | `update_ad_group`, `create_responsive_search_ad`, `set_ad_status`, `add_keywords`, `set_keyword_status` |
+| Creatives | `list_assets`, `upload_image`, `upload_logo`, `create_text_assets`, `create_youtube_video_assets`, `create_asset_group`, `get_asset_group`, `add_campaign_assets`, `remove_campaign_assets` |
 | Targeting | `find_geo_targets`, `list_audiences`, `set_geo_targets`, `set_language_targets`, `set_negative_keywords`, `set_audience_signals` |
-| Conversions | `list_conversion_actions`, `get_conversion_action`, `create_conversion_action`, `update_conversion_action`, `upload_click_conversions` |
+| Conversions | `list_conversion_actions`, `get_conversion_action`, `create_conversion_action`, `update_conversion_action`, `upload_click_conversions`, `set_campaign_conversion_goals` |
 
 ## The workflow for any change
 
@@ -88,13 +89,32 @@ numeric ID from the App Store URL for iOS (`apps.apple.com/.../id123456789` →
   set it only after telling the user which other campaigns are affected.
 - The server enforces spend guardrails from its config (max budget per
   campaign, max total daily budget of enabled campaigns, max increase per
-  change). When a call is refused with "Guardrail: ...", report the limit
-  and the numbers to the user and stop. Don't work around it by splitting a
-  change into smaller calls, pausing unrelated campaigns, or creating new
+  change, max CPC bid or bid ceiling). When a call is refused with
+  "Guardrail: ...", report the limit and the numbers to the user and stop.
+  Don't work around it by splitting a change into smaller calls, pausing
+  unrelated campaigns, or creating new
   campaigns instead; the limit exists to stop exactly that. Stepwise increases
   are fine only when the user explicitly asks for them, one step per decision.
 - `get_spend_overview` → `guardrails.daily_budget_headroom` shows how much
   daily budget can still be enabled.
+
+## Editing existing Search campaigns
+
+- Read first: `get_campaign` shows the bidding strategy and lists the ad
+  groups. Find keyword criterion IDs and ad IDs with `search`; see
+  [references/reporting.md](references/reporting.md).
+- Tools that take `ad_group_id` also accept `campaign_id` for a campaign with
+  exactly one ad group (as `create_search_campaign` makes).
+- Nothing here removes ads, keywords or ad groups; pause them instead.
+  `remove_campaign_assets` only unlinks assets from the campaign.
+- New keywords and ads are enabled by default and start spending at once in
+  an enabled campaign. Confirm them with the user, or create the ad with
+  `status="PAUSED"` to stage it.
+- `set_bidding_strategy` replaces the whole strategy (targets not given are
+  cleared) and restarts Smart Bidding's learning. State the current strategy
+  (the result's `previous`) and the new one, and get a yes first.
+- Ad policy problems come back with their policy topics (e.g.
+  `DESTINATION_NOT_WORKING`); fix the copy or URL instead of retrying.
 
 ## Targeting
 

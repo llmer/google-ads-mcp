@@ -72,6 +72,18 @@ class TestToolsMounting(unittest.IsolatedAsyncioTestCase):
         self.assertIn("targeting_set_geo_targets", tool_names)
         self.assertIn("conversions_create_conversion_action", tool_names)
         self.assertIn("campaigns_get_spend_overview", tool_names)
+        # Tools that edit existing Search campaigns live in the existing
+        # namespaces, so enabling those namespaces enables them.
+        for name in [
+            "campaigns_set_bidding_strategy",
+            "campaigns_create_responsive_search_ad",
+            "campaigns_set_ad_status",
+            "campaigns_update_ad_group",
+            "targeting_add_keywords",
+            "targeting_set_keyword_status",
+            "assets_remove_campaign_assets",
+        ]:
+            self.assertIn(name, tool_names)
         self.assertIn("assets_list_assets", tool_names)
 
     @patch("ads_mcp.config.ToolsConfig.load")

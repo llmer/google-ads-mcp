@@ -34,11 +34,14 @@ to provide several
 
 The following tools create and change entities in your Google Ads accounts.
 New campaigns are always created **paused**: nothing spends money until a
-campaign is enabled with `enable_campaign`. The server tells agents to read
-the current state before changing it, and enforces configurable
-[spend guardrails](#spend-guardrails). Every mutating tool accepts
-`validate_only: true` to check a request without changing anything, and
-monetary amounts are given in the account currency (e.g. `25.5`), not micros.
+campaign is enabled with `enable_campaign`, the only tool that enables
+campaigns (and `update_budget` the only one that raises budgets). The server
+tells agents to read the current state before changing it, and enforces
+configurable [spend guardrails](#spend-guardrails). Every mutating tool
+accepts `validate_only: true` to check a request without changing anything,
+and monetary amounts are given in the account currency (e.g. `25.5`), not
+micros. Tools that edit existing ads, keywords and ad groups pause or enable
+them but never remove them.
 
 - `campaigns` namespace:
   - `list_campaigns`: Campaigns with status, bidding, daily budget and
@@ -53,11 +56,20 @@ monetary amounts are given in the account currency (e.g. `25.5`), not micros.
   - `create_app_campaign`: App campaign promoting an Android or iOS app,
     optimizing for installs, in-app actions or in-app value.
   - `update_budget`, `pause_campaign`, `enable_campaign`.
-  - `update_campaign_settings`: Location targeting mode (presence vs.
-    presence or interest), device bid adjustments, and opting out of
+  - `update_campaign_settings`: Name, networks (Google Search, search
+    partners, Display expansion), end date, location targeting mode (presence
+    vs. presence or interest), device bid adjustments, and opting out of
     automatically created text assets and final URL expansion.
+  - `set_bidding_strategy`: Switch a campaign to Manual CPC (optionally
+    setting ad group default bids), Maximize Clicks (with a CPC bid ceiling),
+    Maximize Conversions (optional target CPA) or Maximize Conversion Value
+    (optional target ROAS).
   - `set_cpc_bids`: Manual CPC bids for a Search campaign's ad group
     default and individual keywords, capped by the `max_cpc_bid` guardrail.
+  - `create_responsive_search_ad`: Add a responsive search ad, with
+    optionally pinned headlines and descriptions, to an existing ad group.
+  - `set_ad_status`, `update_ad_group`: Pause or enable ads; rename, pause
+    or enable an ad group.
   - `set_auto_apply_recommendations`: Pause (or re-enable) auto-applied
     recommendations, which otherwise change keywords, match types, networks,
     bidding and ads without review and bypass the spend guardrails.
@@ -70,12 +82,17 @@ monetary amounts are given in the account currency (e.g. `25.5`), not micros.
   - `add_campaign_assets`: Sitelinks, callouts, a structured snippet, a price
     asset, business name, business logo and images for Search campaigns,
     linked to one or more campaigns; re-runs skip assets already linked.
+  - `remove_campaign_assets`: Unlink sitelinks, callouts and other assets
+    from a campaign. The assets themselves are kept.
   - `create_asset_group`: Add an asset group to a Performance Max campaign.
 - `targeting` namespace:
   - `find_geo_targets`: Look up location IDs by name.
   - `list_audiences`: Audiences usable as Performance Max signals.
   - `set_geo_targets`, `set_language_targets`, `set_negative_keywords`,
     `set_audience_signals`: Add, remove or replace targeting.
+  - `add_keywords`: Add keywords to an existing ad group, skipping ones it
+    already has, with optional keyword bids for Manual CPC.
+  - `set_keyword_status`: Pause or enable keywords by text or criterion ID.
 - `conversions` namespace:
   - `list_conversion_actions`, `get_conversion_action`,
     `create_conversion_action`,
@@ -139,6 +156,12 @@ account's currency. They are checked against live account data before
 `create_*_campaign`, `update_budget` and `enable_campaign` send any change, and
 cannot be overridden through tool parameters. Pausing and lowering budgets is
 never blocked.
+
+`max_cpc_bid` caps every CPC bid or bid ceiling a tool sets
+(`create_search_campaign`, `set_cpc_bids`, `set_bidding_strategy`,
+`add_keywords`). When it is set, Maximize Clicks needs a bid ceiling, and
+switching to Manual CPC is refused while ad group default bids above it would
+take effect, unless new ones are given.
 
 ```yaml
 guardrails:
