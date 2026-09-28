@@ -614,5 +614,239 @@ class TestReadTools(MutateToolTestCase):
         )
 
 
+def _campaign_row(strategy="MANUAL_CPC", channel="SEARCH", **fields):
+    return {
+        "campaign.name": "Search",
+        "campaign.advertising_channel_type": channel,
+        "campaign.bidding_strategy_type": strategy,
+        "campaign.bidding_strategy": "",
+        "customer.currency_code": "USD",
+        **fields,
+    }
+
+
+def _ad_group_bid(name, bid):
+    return {
+        "ad_group.resource_name": f"customers/1/adGroups/{len(name)}",
+        "ad_group.name": name,
+        "ad_group.cpc_bid_micros": int(bid * 1_000_000),
+    }
+
+
+class TestSetBiddingStrategy(MutateToolTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.limits = guardrails.SpendLimits()
+        limits_patch = patch(
+            "ads_mcp.guardrails.get_limits", side_effect=lambda _: self.limits
+        )
+        limits_patch.start()
+        self.addCleanup(limits_patch.stop)
+
+    def _campaign_op(self):
+        operations = self.mutate_calls()[-1]
+        [update] = [
+            op.campaign_operation
+            for op in operations
+            if op._pb.WhichOneof("operation") == "campaign_operation"
+        ]
+        return update, operations
+
+    def test_switches_to_maximize_conversions_with_target(self):
+        self.search_results = [[_campaign_row("MANUAL_CPC")]]
+        result = campaigns.set_bidding_strategy(
+            "1", 5, "MAXIMIZE_CONVERSIONS", target_cpa=4.5
+        )
+        update, operations = self._campaign_op()
+        self.assertEqual(update.update.resource_name, "customers/1/campaigns/5")
+        self.assertEqual(
+            update.update._pb.WhichOneof("campaign_bidding_strategy"),
+            "maximize_conversions",
+        )
+        self.assertEqual(
+            update.update.maximize_conversions.target_cpa_micros, 4_500_000
+        )
+        self.assertEqual(
+            list(update.update_mask.paths),
+            ["maximize_conversions.target_cpa_micros"],
+        )
+        # Status, budget and ad groups are untouched.
+        self.assertEqual(len(operations), 1)
+        self.assertEqual(len(self.queries), 1)
+        self.assertEqual(
+            result["previous"], {"bidding_strategy_type": "MANUAL_CPC"}
+        )
+        self.assertEqual(result["target_cpa"], 4.5)
+
+    def test_masks_a_subfield_even_when_the_strategy_is_empty(self):
+        # A mask naming the strategy message fails with FIELD_HAS_SUBFIELDS;
+        # the subfield path selects the strategy and clears the subfield.
+        for strategy, field, path in [
+            ("MANUAL_CPC", "manual_cpc", "manual_cpc.enhanced_cpc_enabled"),
+            (
+                "MAXIMIZE_CLICKS",
+                "target_spend",
+                "target_spend.cpc_bid_ceiling_micros",
+            ),
+            (
+                "MAXIMIZE_CONVERSIONS",
+                "maximize_conversions",
+                "maximize_conversions.target_cpa_micros",
+            ),
+            (
+                "MAXIMIZE_CONVERSION_VALUE",
+                "maximize_conversion_value",
+                "maximize_conversion_value.target_roas",
+            ),
+        ]:
+            self.search_results = [[_campaign_row("TARGET_SPEND")], []]
+            campaigns.set_bidding_strategy("1", 5, strategy)
+            update, _ = self._campaign_op()
+            self.assertEqual(
+                update.update._pb.WhichOneof("campaign_bidding_strategy"),
+                field,
+            )
+            self.assertEqual(list(update.update_mask.paths), [path], strategy)
+
+    def test_leaving_a_portfolio_strategy_reports_it(self):
+        self.search_results = [
+            [
+                _campaign_row(
+                    "TARGET_SPEND",
+                    **{
+                        "campaign.bidding_strategy": (
+                            "customers/1/biddingStrategies/9"
+                        ),
+                        "campaign.target_spend.cpc_bid_ceiling_micros": 1_500_000,
+                    },
+                )
+            ]
+        ]
+        result = campaigns.set_bidding_strategy(
+            "1", 5, "MAXIMIZE_CONVERSION_VALUE", target_roas=3.5
+        )
+        update, _ = self._campaign_op()
+        self.assertEqual(
+            update.update.maximize_conversion_value.target_roas, 3.5
+        )
+        self.assertEqual(
+            result["previous"],
+            {
+                "bidding_strategy_type": "TARGET_SPEND",
+                "portfolio_bidding_strategy": "customers/1/biddingStrategies/9",
+                "cpc_bid_ceiling": 1.5,
+            },
+        )
+
+    def test_manual_cpc_sets_default_cpc_on_every_ad_group(self):
+        self.search_results = [
+            [_campaign_row("MAXIMIZE_CONVERSIONS")],
+            [_ad_group_bid("Brand", 0.01), _ad_group_bid("Generic", 0.01)],
+        ]
+        result = campaigns.set_bidding_strategy(
+            "1", 5, "MANUAL_CPC", default_cpc=0.8
+        )
+        [operations] = self.mutate_calls()
+        self.assertEqual(
+            operations[0]._pb.WhichOneof("operation"), "campaign_operation"
+        )
+        ad_groups = [op.ad_group_operation for op in operations[1:]]
+        self.assertEqual(
+            [
+                (g.update.resource_name, g.update.cpc_bid_micros)
+                for g in ad_groups
+            ],
+            [
+                ("customers/1/adGroups/5", 800_000),
+                ("customers/1/adGroups/7", 800_000),
+            ],
+        )
+        for group in ad_groups:
+            self.assertEqual(list(group.update_mask.paths), ["cpc_bid_micros"])
+        self.assertIn("ad_group.status != 'REMOVED'", self.queries[1])
+        self.assertEqual(
+            result["ad_group_default_bids"], {"Brand": 0.8, "Generic": 0.8}
+        )
+        self.assertNotIn("next_steps", result)
+
+    def test_manual_cpc_without_default_cpc_keeps_and_reports_bids(self):
+        self.search_results = [
+            [_campaign_row("MAXIMIZE_CONVERSIONS")],
+            [_ad_group_bid("Brand", 0.5)],
+        ]
+        result = campaigns.set_bidding_strategy("1", 5, "MANUAL_CPC")
+        [operations] = self.mutate_calls()
+        self.assertEqual(len(operations), 1)
+        self.assertEqual(result["ad_group_default_bids"], {"Brand": 0.5})
+        self.assertIn("set_cpc_bids", result["next_steps"])
+
+    def test_guardrail_refusals(self):
+        self.limits = guardrails.SpendLimits(max_cpc_bid=2.0)
+        for kwargs, message in [
+            (
+                {"bidding_strategy": "MAXIMIZE_CLICKS", "cpc_bid_ceiling": 3},
+                "max_cpc_bid of 2.0",
+            ),
+            (
+                {"bidding_strategy": "MAXIMIZE_CLICKS"},
+                "needs a CPC bid ceiling",
+            ),
+            (
+                {"bidding_strategy": "MANUAL_CPC", "default_cpc": 2.5},
+                "max_cpc_bid of 2.0",
+            ),
+        ]:
+            with self.assertRaisesRegex(ToolError, message):
+                campaigns.set_bidding_strategy("1", 5, **kwargs)
+        # Stale ad group bids above the limit would apply under MANUAL_CPC.
+        self.search_results = [
+            [_campaign_row("MAXIMIZE_CONVERSIONS")],
+            [_ad_group_bid("Brand", 5.0), _ad_group_bid("Generic", 1.0)],
+        ]
+        with self.assertRaisesRegex(ToolError, r"\{'Brand': 5.0\}"):
+            campaigns.set_bidding_strategy("1", 5, "MANUAL_CPC")
+        self.service.mutate.assert_not_called()
+
+        self.search_results = [[_campaign_row()]]
+        campaigns.set_bidding_strategy(
+            "1", 5, "MAXIMIZE_CLICKS", cpc_bid_ceiling=2.0
+        )
+        update, _ = self._campaign_op()
+        self.assertEqual(
+            update.update.target_spend.cpc_bid_ceiling_micros, 2_000_000
+        )
+
+    def test_rejects_options_of_other_strategies(self):
+        for kwargs in [
+            {"bidding_strategy": "MAXIMIZE_CONVERSIONS", "target_roas": 2.0},
+            {"bidding_strategy": "MANUAL_CPC", "cpc_bid_ceiling": 1.0},
+            {"bidding_strategy": "MAXIMIZE_CLICKS", "default_cpc": 1.0},
+            {"bidding_strategy": "MAXIMIZE_CONVERSIONS", "target_cpa": -1},
+            {"bidding_strategy": "TARGET_IMPRESSION_SHARE"},
+        ]:
+            with self.assertRaises(ToolError, msg=kwargs):
+                campaigns.set_bidding_strategy("1", 5, **kwargs)
+        self.service.mutate.assert_not_called()
+
+    def test_refuses_app_campaigns_and_missing_campaigns(self):
+        self.search_results = [[_campaign_row(channel="MULTI_CHANNEL")]]
+        with self.assertRaisesRegex(ToolError, "App campaigns"):
+            campaigns.set_bidding_strategy("1", 5, "MAXIMIZE_CONVERSIONS")
+        with self.assertRaisesRegex(ToolError, "not found"):
+            campaigns.set_bidding_strategy("1", 5, "MAXIMIZE_CONVERSIONS")
+        self.service.mutate.assert_not_called()
+
+    def test_validate_only(self):
+        self.search_results = [[_campaign_row()]]
+        result = campaigns.set_bidding_strategy(
+            "1", 5, "MAXIMIZE_CONVERSIONS", validate_only=True
+        )
+        self.assertTrue(
+            self.service.mutate.call_args.kwargs["request"].validate_only
+        )
+        self.assertTrue(result["validate_only"])
+
+
 if __name__ == "__main__":
     unittest.main()

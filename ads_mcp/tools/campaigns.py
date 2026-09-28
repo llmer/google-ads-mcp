@@ -1715,3 +1715,231 @@ def set_cpc_bids(
     mutations.mutate(client, customer_id, operations, validate_only)
     result["validate_only"] = validate_only
     return result
+
+
+# The standard bidding strategies set_bidding_strategy switches to: the
+# campaign field, its message type and the subfield to put in the update
+# mask. Google Ads rejects a mask naming the strategy message itself
+# (FIELD_HAS_SUBFIELDS); a subfield path selects the strategy and resets that
+# subfield when it is not set.
+_STRATEGIES = {
+    "MANUAL_CPC": ("manual_cpc", "ManualCpc", "enhanced_cpc_enabled"),
+    "MAXIMIZE_CLICKS": (
+        "target_spend",
+        "TargetSpend",
+        "cpc_bid_ceiling_micros",
+    ),
+    "MAXIMIZE_CONVERSIONS": (
+        "maximize_conversions",
+        "MaximizeConversions",
+        "target_cpa_micros",
+    ),
+    "MAXIMIZE_CONVERSION_VALUE": (
+        "maximize_conversion_value",
+        "MaximizeConversionValue",
+        "target_roas",
+    ),
+}
+
+
+@campaigns_mcp.tool(annotations=_UPDATE)
+def set_bidding_strategy(
+    customer_id: str | int,
+    campaign_id: str | int,
+    bidding_strategy: Literal[
+        "MANUAL_CPC",
+        "MAXIMIZE_CLICKS",
+        "MAXIMIZE_CONVERSIONS",
+        "MAXIMIZE_CONVERSION_VALUE",
+    ],
+    target_cpa: float | None = None,
+    target_roas: float | None = None,
+    cpc_bid_ceiling: float | None = None,
+    default_cpc: float | None = None,
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Switches a campaign to a standard (non-portfolio) bidding strategy, or changes its target.
+
+    The strategy is replaced as a whole: a target that is not given is
+    cleared, and a campaign using a portfolio strategy leaves it. Budget and
+    status do not change. A new strategy restarts Smart Bidding's learning
+    period, so confirm the change with the user first.
+
+      - MANUAL_CPC: you set the bids. default_cpc sets every ad group's
+        default max CPC in the same request; otherwise ad groups keep their
+        current bids (set_cpc_bids changes them later).
+      - MAXIMIZE_CLICKS: cpc_bid_ceiling caps the bid for each click.
+      - MAXIMIZE_CONVERSIONS: needs conversion tracking; optional target_cpa.
+      - MAXIMIZE_CONVERSION_VALUE: needs conversion values; optional target_roas.
+
+    default_cpc and cpc_bid_ceiling above the max_cpc_bid guardrail are
+    refused. When that guardrail is set, MAXIMIZE_CLICKS needs a ceiling, and
+    MANUAL_CPC needs default_cpc if ad groups have default bids above it.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        campaign_id: The campaign ID.
+        bidding_strategy: The strategy to use.
+        target_cpa: Target cost per conversion, for MAXIMIZE_CONVERSIONS.
+        target_roas: Target return on ad spend as a ratio (3.5 = 350%), for
+          MAXIMIZE_CONVERSION_VALUE.
+        cpc_bid_ceiling: Maximum bid per click, for MAXIMIZE_CLICKS.
+        default_cpc: Default max CPC for every ad group, for MANUAL_CPC.
+        validate_only: If true, validates the request without changing anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The previous and new strategy, and for MANUAL_CPC the ad groups'
+        default bids. Monetary values are in the account currency.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    campaign_id = mutations.parse_id(campaign_id, "campaign_id")
+    if bidding_strategy not in _STRATEGIES:
+        raise ToolError(f"Unsupported bidding strategy '{bidding_strategy}'.")
+    options = {
+        "target_cpa": (target_cpa, "MAXIMIZE_CONVERSIONS"),
+        "target_roas": (target_roas, "MAXIMIZE_CONVERSION_VALUE"),
+        "cpc_bid_ceiling": (cpc_bid_ceiling, "MAXIMIZE_CLICKS"),
+        "default_cpc": (default_cpc, "MANUAL_CPC"),
+    }
+    for option, (value, strategy) in options.items():
+        if value is None:
+            continue
+        if strategy != bidding_strategy:
+            raise ToolError(f"{option} only applies to {strategy}.")
+        if value <= 0 or (
+            option != "target_roas" and not mutations.to_micros(value)
+        ):
+            raise ToolError(f"{option} must be at least 0.01.")
+    limits = guardrails.get_limits(customer_id)
+    _check_click_bid(
+        limits,
+        bidding_strategy,
+        default_cpc if default_cpc is not None else cpc_bid_ceiling,
+    )
+
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    rows = mutations.search(
+        client,
+        customer_id,
+        "SELECT campaign.name, campaign.advertising_channel_type, "
+        "campaign.bidding_strategy_type, campaign.bidding_strategy, "
+        "campaign.maximize_conversions.target_cpa_micros, "
+        "campaign.maximize_conversion_value.target_roas, "
+        "campaign.target_spend.cpc_bid_ceiling_micros, customer.currency_code "
+        f"FROM campaign WHERE campaign.id = {campaign_id}",
+    )
+    if not rows:
+        raise ToolError(f"Campaign {campaign_id} not found.")
+    row = rows[0]
+    if row.get("campaign.advertising_channel_type") == "MULTI_CHANNEL":
+        raise ToolError(
+            "App campaigns bid towards their app campaign goal; this tool "
+            "does not change them."
+        )
+
+    def micros(field):
+        value = row.get(field)
+        return mutations.from_micros(value) if value else None
+
+    previous = {
+        "bidding_strategy_type": row.get("campaign.bidding_strategy_type"),
+        "portfolio_bidding_strategy": row.get("campaign.bidding_strategy"),
+        "target_cpa": micros("campaign.maximize_conversions.target_cpa_micros"),
+        "target_roas": row.get(
+            "campaign.maximize_conversion_value.target_roas"
+        ),
+        "cpc_bid_ceiling": micros(
+            "campaign.target_spend.cpc_bid_ceiling_micros"
+        ),
+    }
+
+    ad_groups: List[Dict[str, Any]] = []
+    if bidding_strategy == "MANUAL_CPC":
+        ad_groups = mutations.search(
+            client,
+            customer_id,
+            "SELECT ad_group.resource_name, ad_group.name, "
+            "ad_group.cpc_bid_micros FROM ad_group "
+            f"WHERE campaign.id = {campaign_id} "
+            "AND ad_group.status != 'REMOVED'",
+        )
+        if default_cpc is None and limits.max_cpc_bid is not None:
+            too_high = {}
+            for group in ad_groups:
+                bid = mutations.from_micros(
+                    group.get("ad_group.cpc_bid_micros")
+                )
+                if bid and bid > limits.max_cpc_bid:
+                    too_high[group["ad_group.name"]] = bid
+            if too_high:
+                raise ToolError(
+                    "Guardrail: with MANUAL_CPC these ad group default bids "
+                    "would apply, above the configured max_cpc_bid of "
+                    f"{limits.max_cpc_bid}: {too_high}. Give default_cpc to "
+                    "replace them."
+                )
+
+    field, type_name, subfield = _STRATEGIES[bidding_strategy]
+    op = client.get_type("MutateOperation")
+    campaign = op.campaign_operation.update
+    campaign.resource_name = _campaign_rn(customer_id, campaign_id)
+    # Sets the oneof member even when no subfield is set, e.g. ManualCpc.
+    client.copy_from(getattr(campaign, field), client.get_type(type_name))
+    if target_cpa is not None:
+        campaign.maximize_conversions.target_cpa_micros = mutations.to_micros(
+            target_cpa
+        )
+    if target_roas is not None:
+        campaign.maximize_conversion_value.target_roas = target_roas
+    if cpc_bid_ceiling is not None:
+        campaign.target_spend.cpc_bid_ceiling_micros = mutations.to_micros(
+            cpc_bid_ceiling
+        )
+    mutations.update_mask(
+        client, op.campaign_operation.update_mask, [f"{field}.{subfield}"]
+    )
+    operations = [(op, f"campaign {campaign_id} bidding strategy")]
+
+    if default_cpc is not None:
+        for group in ad_groups:
+            op = client.get_type("MutateOperation")
+            ad_group = op.ad_group_operation.update
+            ad_group.resource_name = group["ad_group.resource_name"]
+            ad_group.cpc_bid_micros = mutations.to_micros(default_cpc)
+            mutations.update_mask(
+                client, op.ad_group_operation.update_mask, ["cpc_bid_micros"]
+            )
+            operations.append(
+                (op, f"ad group '{group['ad_group.name']}' default CPC")
+            )
+
+    mutations.mutate(client, customer_id, operations, validate_only)
+    result: Dict[str, Any] = {
+        "campaign_id": campaign_id,
+        "name": row.get("campaign.name"),
+        "currency_code": row.get("customer.currency_code"),
+        "previous": {k: v for k, v in previous.items() if v},
+        "bidding_strategy": bidding_strategy,
+    }
+    for option, (value, _) in options.items():
+        if value is not None:
+            result[option] = value
+    if bidding_strategy == "MANUAL_CPC":
+        result["ad_group_default_bids"] = {
+            group["ad_group.name"]: (
+                default_cpc
+                if default_cpc is not None
+                else mutations.from_micros(group.get("ad_group.cpc_bid_micros"))
+            )
+            for group in ad_groups
+        }
+        if default_cpc is None:
+            result["next_steps"] = (
+                "Ad groups keep the default bids shown. Change them with "
+                "set_cpc_bids (one ad group), or call this tool again with "
+                "default_cpc."
+            )
+    result["validate_only"] = validate_only
+    return result
