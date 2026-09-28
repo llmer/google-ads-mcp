@@ -93,6 +93,37 @@ def resource_name(customer_id: str, collection: str, value: str | int) -> str:
     return f"customers/{customer_id}/{collection}/{parse_id(value, collection)}"
 
 
+def parse_composite_id(
+    value: str, customer_id: str, collection: str, label: str
+) -> List[str]:
+    """Splits a composite ID into its parts.
+
+    Accepts "2~3" or a resource name such as customers/1/adGroupAds/2~3, which
+    must belong to `customer_id`. The caller validates each part.
+    """
+    text = str(value).strip()
+    if "/" in text:
+        match = re.fullmatch(rf"customers/(\d+)/{collection}/([^/]+)", text)
+        if not match:
+            raise ToolError(
+                f"Invalid {label}: '{value}'. Expected "
+                f"customers/<customer id>/{collection}/<id>."
+            )
+        if match.group(1) != customer_id:
+            raise ToolError(
+                f"{label} '{value}' belongs to customer {match.group(1)}, "
+                f"not {customer_id}."
+            )
+        text = match.group(2)
+    return text.split("~")
+
+
+def last_id(resource: str) -> str:
+    """Returns the last ID of a resource name, e.g. the ad ID of
+    customers/1/adGroupAds/2~3."""
+    return resource.rsplit("/", 1)[-1].split("~")[-1]
+
+
 def geo_target_constant(value: str | int) -> str:
     return f"geoTargetConstants/{parse_id(value, 'geo target id')}"
 
@@ -165,13 +196,41 @@ def update_mask(client: GoogleAdsClient, target, paths: Iterable[str]):
     client.copy_from(target, field_mask_pb2.FieldMask(paths=list(paths)))
 
 
+def _policy_details(error) -> str:
+    """Describes the policy topics or violation reported with an error, if any."""
+    parts = []
+    for entry in error.details.policy_finding_details.policy_topic_entries:
+        part = entry.topic
+        if entry.type_:
+            part += f" ({entry.type_.name})"
+        evidence = [
+            text
+            for evidence in entry.evidences
+            for text in evidence.text_list.texts
+        ]
+        if evidence:
+            part += f": {', '.join(repr(text) for text in evidence)}"
+        parts.append(part)
+    violation = error.details.policy_violation_details
+    name = violation.external_policy_name or violation.key.policy_name
+    if name:
+        part = name
+        if violation.key.violating_text:
+            part += f": {violation.key.violating_text!r}"
+        if violation.is_exemptible:
+            part += " (exemptible)"
+        parts.append(part)
+    return "; ".join(parts)
+
+
 def format_google_ads_exception(
     ex: GoogleAdsException, labels: Sequence[str] | None = None
 ) -> str:
     """Turns a GoogleAdsException into a message an LLM can act on.
 
-    Includes the error code and the field path of each error, and when
-    `labels` is given, a description of the operation that failed.
+    Includes the error code and the field path of each error, the policy
+    topics of policy errors, and when `labels` is given, a description of the
+    operation that failed.
     """
     lines = [f"Request ID: {ex.request_id}"]
     for error in ex.failure.errors:
@@ -201,6 +260,9 @@ def format_google_ads_exception(
             and operation_index < len(labels)
         ):
             line += f" [operation: {labels[operation_index]}]"
+        policy = _policy_details(error)
+        if policy:
+            line += f" Policy: {policy}"
         lines.append(line)
     return "\n".join(lines)
 
@@ -272,6 +334,50 @@ def search(
         return output
     except GoogleAdsException as ex:
         raise ToolError(format_google_ads_exception(ex))
+
+
+def find_ad_group(
+    client: GoogleAdsClient,
+    customer_id: str,
+    ad_group_id: str | int | None,
+    campaign_id: str | int | None,
+) -> Dict[str, Any]:
+    """Returns the ad group to change: the given one, or the only ad group of
+    the given campaign.
+
+    The row has the ad group's id, name and status, and its campaign's id,
+    name, channel type and bidding strategy type.
+    """
+    if ad_group_id is None and campaign_id is None:
+        raise ToolError(
+            "Give ad_group_id, or campaign_id for a campaign with one ad group."
+        )
+    conditions = ["ad_group.status != 'REMOVED'"]
+    if ad_group_id is not None:
+        ad_group_id = parse_id(ad_group_id, "ad_group_id")
+        conditions.append(f"ad_group.id = {ad_group_id}")
+    if campaign_id is not None:
+        campaign_id = parse_id(campaign_id, "campaign_id")
+        conditions.append(f"campaign.id = {campaign_id}")
+    rows = search(
+        client,
+        customer_id,
+        "SELECT ad_group.id, ad_group.name, ad_group.status, campaign.id, "
+        "campaign.name, campaign.advertising_channel_type, "
+        "campaign.bidding_strategy_type FROM ad_group "
+        f"WHERE {' AND '.join(conditions)}",
+    )
+    if ad_group_id is not None:
+        if not rows:
+            scope = f" in campaign {campaign_id}" if campaign_id else ""
+            raise ToolError(f"Ad group {ad_group_id} not found{scope}.")
+        return rows[0]
+    if len(rows) != 1:
+        raise ToolError(
+            f"Campaign {campaign_id} has {len(rows)} ad groups (or was not "
+            "found); give ad_group_id instead. get_campaign lists them."
+        )
+    return rows[0]
 
 
 def plan_changes(
