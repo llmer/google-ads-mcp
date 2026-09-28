@@ -12,18 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tools for creating assets and Performance Max asset groups."""
+"""Tools for creating assets and Performance Max asset groups, and for
+linking assets to (and unlinking them from) campaigns."""
 
 import base64
 import binascii
 import ipaddress
 import os
+import re
 import socket
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from typing import Any, Dict, List, Literal, Tuple
+from typing import Any, Dict, List, Literal, Tuple, get_args
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -1186,3 +1188,179 @@ def add_campaign_assets(
     if operations:
         mutations.mutate(client, customer_id, operations, validate_only)
     return {"campaigns": summary, "validate_only": validate_only}
+
+
+# Asset field types that link assets to Search campaigns.
+CampaignAssetFieldType = Literal[
+    "SITELINK",
+    "CALLOUT",
+    "STRUCTURED_SNIPPET",
+    "PRICE",
+    "PROMOTION",
+    "CALL",
+    "MOBILE_APP",
+    "LEAD_FORM",
+    "BUSINESS_NAME",
+    "BUSINESS_LOGO",
+    "AD_IMAGE",
+]
+
+_CAMPAIGN_ASSET_QUERY = (
+    "SELECT campaign_asset.resource_name, campaign_asset.field_type, "
+    "campaign.id, asset.id, asset.name, asset.sitelink_asset.link_text, "
+    "asset.callout_asset.callout_text, asset.structured_snippet_asset.header, "
+    "asset.text_asset.text FROM campaign_asset "
+    "WHERE campaign_asset.status != 'REMOVED'"
+)
+
+
+@assets_mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True
+    )
+)
+def remove_campaign_assets(
+    customer_id: str | int,
+    campaign_id: str | int | None = None,
+    asset_ids: List[str | int] | None = None,
+    field_type: CampaignAssetFieldType | None = None,
+    resource_names: List[str] | None = None,
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Unlinks assets (sitelinks, callouts, snippets, prices...) from a campaign. The assets
+    themselves are kept, and add_campaign_assets can link them again.
+
+    Identify links by asset_ids in campaign_id, optionally only those of
+    field_type (by default every field type the asset is linked as), and/or
+    by campaign_asset resource names
+    (customers/<customer id>/campaignAssets/<campaign id>~<asset id>~<field type>).
+    Find them with the search tool: resource campaign_asset, fields
+    campaign_asset.resource_name, campaign_asset.field_type, asset.id and
+    asset.name. If any link is not found, nothing changes.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        campaign_id: The campaign of asset_ids.
+        asset_ids: IDs of the assets to unlink from campaign_id.
+        field_type: Only unlink asset_ids linked as this field type.
+        resource_names: campaign_asset resource names.
+        validate_only: If true, validates the request without changing anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The links removed: campaign, asset, field type and text.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    if field_type is not None and field_type not in get_args(
+        CampaignAssetFieldType
+    ):
+        raise ToolError(f"Unsupported field_type '{field_type}'.")
+    ids = [mutations.parse_id(a, "asset_id") for a in asset_ids or []]
+    if ids:
+        if campaign_id is None:
+            raise ToolError(
+                "asset_ids need campaign_id, or use resource_names."
+            )
+        campaign_id = mutations.parse_id(campaign_id, "campaign_id")
+    if field_type is not None and not ids:
+        raise ToolError("field_type applies to asset_ids.")
+    link_rns = []
+    for value in resource_names or []:
+        parts = mutations.parse_composite_id(
+            value, customer_id, "campaignAssets", "campaign asset resource name"
+        )
+        if not (
+            len(parts) == 3
+            and re.fullmatch(r"\d+", parts[0])
+            and re.fullmatch(r"\d+", parts[1])
+            and re.fullmatch(r"[A-Z_]+", parts[2])
+        ):
+            raise ToolError(
+                f"Invalid campaign asset resource name '{value}'. Expected "
+                "customers/<customer id>/campaignAssets/"
+                "<campaign id>~<asset id>~<field type>."
+            )
+        link_rns.append(
+            f"customers/{customer_id}/campaignAssets/{'~'.join(parts)}"
+        )
+    if not ids and not link_rns:
+        raise ToolError(
+            "Give asset_ids with campaign_id, and/or resource_names."
+        )
+
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    # (what was asked for, the links it matches)
+    requested: List[Tuple[str, List[Dict[str, Any]]]] = []
+    if ids:
+        query = (
+            f"{_CAMPAIGN_ASSET_QUERY} AND campaign.id = {campaign_id} "
+            f"AND asset.id IN ({', '.join(ids)})"
+        )
+        if field_type:
+            query += f" AND campaign_asset.field_type = '{field_type}'"
+        rows = mutations.search(client, customer_id, query)
+        for asset_id in dict.fromkeys(ids):
+            requested.append(
+                (
+                    f"asset {asset_id}",
+                    [r for r in rows if str(r["asset.id"]) == asset_id],
+                )
+            )
+    if link_rns:
+        names = ", ".join(f"'{rn}'" for rn in link_rns)
+        rows = mutations.search(
+            client,
+            customer_id,
+            f"{_CAMPAIGN_ASSET_QUERY} "
+            f"AND campaign_asset.resource_name IN ({names})",
+        )
+        for rn in link_rns:
+            requested.append(
+                (
+                    rn,
+                    [
+                        r
+                        for r in rows
+                        if r["campaign_asset.resource_name"] == rn
+                    ],
+                )
+            )
+    missing = [label for label, found in requested if not found]
+    if missing:
+        where = f" in campaign {campaign_id}" if ids else ""
+        raise ToolError(
+            f"No linked assets found for {missing}{where}. Nothing was changed."
+        )
+
+    links: Dict[str, Dict[str, Any]] = {}
+    for _, found in requested:
+        for row in found:
+            links.setdefault(row["campaign_asset.resource_name"], row)
+    operations, unlinked = [], []
+    for rn, row in links.items():
+        text = (
+            row.get("asset.sitelink_asset.link_text")
+            or row.get("asset.callout_asset.callout_text")
+            or row.get("asset.structured_snippet_asset.header")
+            or row.get("asset.text_asset.text")
+            or row.get("asset.name")
+        )
+        link = {
+            "campaign_id": str(row["campaign.id"]),
+            "asset_id": str(row["asset.id"]),
+            "field_type": row["campaign_asset.field_type"],
+            "text": text,
+        }
+        op = client.get_type("MutateOperation")
+        op.campaign_asset_operation.remove = rn
+        operations.append(
+            (
+                op,
+                f"unlink {link['field_type']} asset {link['asset_id']} "
+                f"from campaign {link['campaign_id']}",
+            )
+        )
+        unlinked.append(link)
+    mutations.mutate(client, customer_id, operations, validate_only)
+    return {"unlinked": unlinked, "validate_only": validate_only}
