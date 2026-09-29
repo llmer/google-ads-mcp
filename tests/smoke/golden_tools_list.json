@@ -4830,6 +4830,58 @@
       "annotations": {
         "readOnlyHint": true
       },
+      "description": "Lists the account-level exclusions, which apply to every campaign in the account.\n\nThese are the only placement and content exclusions App campaigns honour.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The Google Ads customer ID."
+          },
+          "login_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional manager customer ID to use as the login-customer-id header."
+          }
+        },
+        "required": [
+          "customer_id"
+        ],
+        "type": "object"
+      },
+      "name": "targeting_list_account_exclusions",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Targeting List Account Exclusions"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true
+      },
       "description": "Lists the account's audiences, whose IDs can be used as Performance Max audience signals.\n\nAudiences are created in the Google Ads UI (Tools > Audience manager) and\ncombine your data segments (e.g. app users, site visitors), interests and\ndemographics.",
       "inputSchema": {
         "additionalProperties": false,
@@ -4884,6 +4936,157 @@
         "x-fastmcp-wrap-result": true
       },
       "title": "Targeting List Audiences"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Sets account-level exclusions, which stop ads in every campaign from showing there.\n\nApp campaigns take placement and content exclusions only at the account\nlevel, so this is how to keep their Display and YouTube traffic off\nlow-quality sites and apps. Exclusions only narrow where ads show; they\nnever raise spend. Read the current ones with list_account_exclusions.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "content_labels": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Content types to exclude, e.g. \"SEXUALLY_SUGGESTIVE\",\n\"PROFANITY\", \"TRAGEDY\", \"JUVENILE\", \"BELOW_THE_FOLD\",\n\"PARKED_DOMAIN\", \"EMBEDDED_VIDEO\", \"LIVE_STREAMING_VIDEO\"."
+          },
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The Google Ads customer ID."
+          },
+          "login_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional manager customer ID to use as the login-customer-id header."
+          },
+          "mobile_app_categories": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Mobile app category IDs; find them by querying\nthe `mobile_app_category_constant` resource with the search tool."
+          },
+          "mobile_apps": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Apps to exclude, as \"2-<package name>\" for Android\n(e.g. \"2-com.example.game\") or \"1-<App Store ID>\" for iOS."
+          },
+          "mode": {
+            "default": "add",
+            "description": "add, remove or replace. With replace, only the kinds given are\nreplaced: exclusions of a kind not passed are left alone.",
+            "enum": [
+              "add",
+              "remove",
+              "replace"
+            ],
+            "type": "string"
+          },
+          "placements": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Websites to exclude, e.g. \"example.com\"."
+          },
+          "validate_only": {
+            "default": false,
+            "description": "If true, validates the request without changing anything.",
+            "type": "boolean"
+          },
+          "youtube_channels": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "YouTube channel IDs, e.g. \"UCxxxxxxxxxxxxxxxxxxxxxx\"."
+          }
+        },
+        "required": [
+          "customer_id"
+        ],
+        "type": "object"
+      },
+      "name": "targeting_set_account_exclusions",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Targeting Set Account Exclusions"
     },
     {
       "_meta": {

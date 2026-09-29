@@ -116,6 +116,113 @@ class TestSetNegativeKeywords(MutateToolTestCase):
         )
 
 
+def _exclusion(rn, type_, **fields):
+    row = {
+        "customer_negative_criterion.resource_name": rn,
+        "customer_negative_criterion.type": type_,
+    }
+    row.update(
+        {f"customer_negative_criterion.{k}": v for k, v in fields.items()}
+    )
+    return row
+
+
+class TestAccountExclusions(MutateToolTestCase):
+
+    def test_list_groups_by_kind_and_counts_others(self):
+        self.search_results = [
+            [
+                _exclusion(
+                    "rn/parked",
+                    "CONTENT_LABEL",
+                    **{"content_label.type": "PARKED_DOMAIN"},
+                ),
+                _exclusion(
+                    "rn/app",
+                    "MOBILE_APPLICATION",
+                    **{"mobile_application.app_id": "2-com.spam"},
+                ),
+                _exclusion("rn/list", "NEGATIVE_KEYWORD_LIST"),
+            ]
+        ]
+        result = targeting.list_account_exclusions("1")
+        self.assertEqual(result["content_labels"], ["PARKED_DOMAIN"])
+        self.assertEqual(result["mobile_apps"], ["2-com.spam"])
+        self.assertEqual(result["placements"], [])
+        self.assertEqual(result["other_exclusions"], 1)
+
+    def test_add_builds_each_kind_and_skips_existing(self):
+        self.search_results = [
+            [
+                _exclusion(
+                    "rn/parked",
+                    "CONTENT_LABEL",
+                    **{"content_label.type": "PARKED_DOMAIN"},
+                ),
+                _exclusion(
+                    "rn/site", "PLACEMENT", **{"placement.url": "spam.example"}
+                ),
+            ]
+        ]
+        result = targeting.set_account_exclusions(
+            "1",
+            placements=["https://Spam.example/", "junk.example"],
+            mobile_apps=["2-com.spam.app"],
+            mobile_app_categories=[60008],
+            youtube_channels=["UC123"],
+            content_labels=["parked_domain", "profanity"],
+        )
+        [operations] = self.mutate_calls()
+        created = self.created(
+            operations, "customer_negative_criterion_operation"
+        )
+        self.assertEqual(created[0].placement.url, "junk.example")
+        self.assertEqual(created[1].mobile_application.app_id, "2-com.spam.app")
+        self.assertEqual(
+            created[2].mobile_app_category.mobile_app_category_constant,
+            "mobileAppCategoryConstants/60008",
+        )
+        self.assertEqual(created[3].youtube_channel.channel_id, "UC123")
+        self.assertEqual(created[4].content_label.type_.name, "PROFANITY")
+        self.assertEqual(len(created), 5)
+        self.assertEqual(result["removed"], [])
+
+    def test_replace_touches_only_the_kinds_given(self):
+        self.search_results = [
+            [
+                _exclusion(
+                    "rn/parked",
+                    "CONTENT_LABEL",
+                    **{"content_label.type": "PARKED_DOMAIN"},
+                ),
+                _exclusion(
+                    "rn/old", "PLACEMENT", **{"placement.url": "old.example"}
+                ),
+            ]
+        ]
+        result = targeting.set_account_exclusions(
+            "1", placements=["new.example"], mode="replace"
+        )
+        self.assertEqual(result["removed"], ["rn/old"])
+        self.assertEqual(result["added"], [["placements", "new.example"]])
+
+    def test_rejects_bad_items(self):
+        with self.assertRaises(ToolError):
+            targeting.set_account_exclusions("1", mobile_apps=["com.spam"])
+        with self.assertRaises(ToolError):
+            targeting.set_account_exclusions("1", content_labels=["NOPE"])
+        with self.assertRaises(ToolError):
+            targeting.set_account_exclusions("1")
+        self.assertEqual(self.mutate_calls(), [])
+
+    def test_validate_only_is_passed_through(self):
+        targeting.set_account_exclusions(
+            "1", content_labels=["TRAGEDY"], validate_only=True
+        )
+        [call] = self.service.mutate.call_args_list
+        self.assertTrue(call.kwargs["request"].validate_only)
+
+
 class TestSetLanguageTargets(MutateToolTestCase):
 
     def test_adds_languages(self):

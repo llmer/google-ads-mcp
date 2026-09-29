@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tools for targeting: locations, languages, keywords, negative keywords and
-Performance Max audience signals.
+"""Tools for targeting: locations, languages, keywords, negative keywords,
+account-level exclusions and Performance Max audience signals.
 
 The set_* tools for campaign criteria and signals take a `mode`:
   - "add" (default): adds the given items, keeping existing ones.
@@ -392,6 +392,208 @@ def set_negative_keywords(
         [mutations.parse_keyword(k, "BROAD") for k in keywords],
         mode,
         set_key,
+        validate_only,
+    )
+
+
+# Account-level exclusions (customer_negative_criterion): each kind, with the
+# criterion field that holds it and the field that identifies an item.
+_EXCLUSION_KINDS = {
+    "placements": ("PLACEMENT", "placement.url"),
+    "mobile_apps": ("MOBILE_APPLICATION", "mobile_application.app_id"),
+    "mobile_app_categories": (
+        "MOBILE_APP_CATEGORY",
+        "mobile_app_category.mobile_app_category_constant",
+    ),
+    "youtube_channels": ("YOUTUBE_CHANNEL", "youtube_channel.channel_id"),
+    "content_labels": ("CONTENT_LABEL", "content_label.type"),
+}
+
+_APP_ID = re.compile(r"^[12]-\S+$")
+
+
+def _exclusion_keys(client, kind: str, values: List[str | int]) -> List[tuple]:
+    """Validates and normalizes the items of one exclusion kind into keys."""
+    keys = []
+    for value in values:
+        text = str(value).strip()
+        if not text:
+            raise ToolError(f"{kind} must not contain empty items.")
+        if kind == "placements":
+            text = re.sub(r"^https?://", "", text.lower()).rstrip("/")
+        elif kind == "mobile_apps":
+            if not _APP_ID.match(text):
+                raise ToolError(
+                    f"Invalid mobile app '{text}': use '2-<package name>' for "
+                    "Android or '1-<App Store ID>' for iOS, e.g. "
+                    "'2-com.example.game'."
+                )
+        elif kind == "mobile_app_categories":
+            text = "mobileAppCategoryConstants/" + mutations.parse_id(
+                text.removeprefix("mobileAppCategoryConstants/"),
+                "mobile_app_categories",
+            )
+        elif kind == "content_labels":
+            text = text.upper()
+            if text not in client.enums.ContentLabelTypeEnum.__members__ or (
+                text in ("UNSPECIFIED", "UNKNOWN")
+            ):
+                raise ToolError(f"Invalid content label '{text}'.")
+        keys.append((kind, text))
+    return keys
+
+
+def _exclusion_rows(client, customer_id: str) -> List[Dict[str, Any]]:
+    fields = ", ".join(
+        f"customer_negative_criterion.{field}"
+        for _, field in _EXCLUSION_KINDS.values()
+    )
+    return mutations.search(
+        client,
+        customer_id,
+        "SELECT customer_negative_criterion.resource_name, "
+        f"customer_negative_criterion.type, {fields} "
+        "FROM customer_negative_criterion",
+    )
+
+
+def _existing_exclusions(rows: List[Dict[str, Any]]) -> Dict[tuple, str]:
+    """Maps (kind, value) to resource name, for the kinds this server manages."""
+    by_type = {
+        t: (kind, field) for kind, (t, field) in _EXCLUSION_KINDS.items()
+    }
+    existing = {}
+    for row in rows:
+        kind_field = by_type.get(row.get("customer_negative_criterion.type"))
+        if not kind_field:
+            continue
+        kind, field = kind_field
+        value = str(row.get(f"customer_negative_criterion.{field}", ""))
+        if kind == "placements":
+            value = value.lower()
+        existing[(kind, value)] = row[
+            "customer_negative_criterion.resource_name"
+        ]
+    return existing
+
+
+@targeting_mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+def list_account_exclusions(
+    customer_id: str | int,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Lists the account-level exclusions, which apply to every campaign in the account.
+
+    These are the only placement and content exclusions App campaigns honour.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The excluded placements, mobile apps, mobile app categories, YouTube
+        channels and content labels, plus the count of exclusions of other
+        kinds (e.g. placement or keyword lists) this server does not manage.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    rows = _exclusion_rows(client, customer_id)
+    existing = _existing_exclusions(rows)
+    result: Dict[str, Any] = {kind: [] for kind in _EXCLUSION_KINDS}
+    for kind, value in existing:
+        result[kind].append(value)
+    result["other_exclusions"] = len(rows) - len(existing)
+    return result
+
+
+@targeting_mcp.tool(annotations=_UPDATE)
+def set_account_exclusions(
+    customer_id: str | int,
+    placements: List[str] | None = None,
+    mobile_apps: List[str] | None = None,
+    mobile_app_categories: List[str | int] | None = None,
+    youtube_channels: List[str] | None = None,
+    content_labels: List[str] | None = None,
+    mode: Mode = "add",
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Sets account-level exclusions, which stop ads in every campaign from showing there.
+
+    App campaigns take placement and content exclusions only at the account
+    level, so this is how to keep their Display and YouTube traffic off
+    low-quality sites and apps. Exclusions only narrow where ads show; they
+    never raise spend. Read the current ones with list_account_exclusions.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        placements: Websites to exclude, e.g. "example.com".
+        mobile_apps: Apps to exclude, as "2-<package name>" for Android
+          (e.g. "2-com.example.game") or "1-<App Store ID>" for iOS.
+        mobile_app_categories: Mobile app category IDs; find them by querying
+          the `mobile_app_category_constant` resource with the search tool.
+        youtube_channels: YouTube channel IDs, e.g. "UCxxxxxxxxxxxxxxxxxxxxxx".
+        content_labels: Content types to exclude, e.g. "SEXUALLY_SUGGESTIVE",
+          "PROFANITY", "TRAGEDY", "JUVENILE", "BELOW_THE_FOLD",
+          "PARKED_DOMAIN", "EMBEDDED_VIDEO", "LIVE_STREAMING_VIDEO".
+        mode: add, remove or replace. With replace, only the kinds given are
+          replaced: exclusions of a kind not passed are left alone.
+        validate_only: If true, validates the request without changing anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The exclusions added and removed, as [kind, value].
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    given = {
+        "placements": placements,
+        "mobile_apps": mobile_apps,
+        "mobile_app_categories": mobile_app_categories,
+        "youtube_channels": youtube_channels,
+        "content_labels": content_labels,
+    }
+    given = {
+        kind: values for kind, values in given.items() if values is not None
+    }
+    if not given:
+        raise ToolError("Nothing to set: give at least one kind of exclusion.")
+    desired = [
+        key
+        for kind, values in given.items()
+        for key in _exclusion_keys(client, kind, values)
+    ]
+    existing = {
+        key: rn
+        for key, rn in _existing_exclusions(
+            _exclusion_rows(client, customer_id)
+        ).items()
+        if key[0] in given
+    }
+    to_create, to_remove = mutations.plan_changes(existing, desired, mode)
+
+    def build(criterion, key):
+        kind, value = key
+        if kind == "placements":
+            criterion.placement.url = value
+        elif kind == "mobile_apps":
+            criterion.mobile_application.app_id = value
+        elif kind == "mobile_app_categories":
+            criterion.mobile_app_category.mobile_app_category_constant = value
+        elif kind == "youtube_channels":
+            criterion.youtube_channel.channel_id = value
+        else:
+            criterion.content_label.type_ = client.enums.ContentLabelTypeEnum[
+                value
+            ]
+
+    return _apply_changes(
+        client,
+        customer_id,
+        to_create,
+        to_remove,
+        build,
+        "customer_negative_criterion_operation",
         validate_only,
     )
 

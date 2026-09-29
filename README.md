@@ -91,6 +91,11 @@ them but never remove them.
   - `list_audiences`: Audiences usable as Performance Max signals.
   - `set_geo_targets`, `set_language_targets`, `set_negative_keywords`,
     `set_audience_signals`: Add, remove or replace targeting.
+  - `list_account_exclusions`, `set_account_exclusions`: Account-level
+    exclusions of websites, apps, app categories, YouTube channels and
+    content labels, which apply to every campaign. They are the only
+    placement and content exclusions App campaigns honour; `replace` only
+    replaces the kinds given.
   - `add_keywords`: Add keywords to an existing ad group, skipping ones it
     already has, with optional keyword bids for Manual CPC.
   - `set_keyword_status`: Pause or enable keywords by text or criterion ID.

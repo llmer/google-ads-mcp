@@ -24,7 +24,7 @@ server prefix too (`mcp__google-ads__...`).
 | Change campaigns | `update_budget`, `pause_campaign`, `enable_campaign`, `update_campaign_settings`, `set_bidding_strategy`, `set_cpc_bids`, `set_auto_apply_recommendations` |
 | Edit Search ad groups, ads and keywords | `update_ad_group`, `create_responsive_search_ad`, `set_ad_status`, `add_keywords`, `set_keyword_status` |
 | Creatives | `list_assets`, `upload_image`, `upload_logo`, `create_text_assets`, `create_youtube_video_assets`, `create_asset_group`, `get_asset_group`, `add_campaign_assets`, `remove_campaign_assets` |
-| Targeting | `find_geo_targets`, `list_audiences`, `set_geo_targets`, `set_language_targets`, `set_negative_keywords`, `set_audience_signals` |
+| Targeting | `find_geo_targets`, `list_audiences`, `set_geo_targets`, `set_language_targets`, `set_negative_keywords`, `set_audience_signals`, `list_account_exclusions`, `set_account_exclusions` (account-wide; the only placement and content exclusions App campaigns honour) |
 | Conversions | `list_conversion_actions`, `get_conversion_action`, `create_conversion_action`, `update_conversion_action`, `upload_click_conversions`, `set_campaign_conversion_goals` |
 
 ## The workflow for any change
