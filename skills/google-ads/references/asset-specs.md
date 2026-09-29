@@ -2,17 +2,22 @@
 
 Character limits count wide characters (e.g. CJK) as two.
 
-## Search: `create_search_campaign`
+## Search: `create_search_campaign`, `create_responsive_search_ad`
 
 | Field | Count | Max length |
 |---|---|---|
 | headlines | 3–15 (aim for 10+) | 30 |
 | descriptions | 2–4 (aim for 4) | 90 |
-| path1, path2 | optional | 15 each |
+| path1, path2 | optional (path2 needs path1) | 15 each |
 
 Responsive search ads mix headlines, so each must stand alone. Vary them:
 product name, key benefit, offer, call to action, a keyword-rich one. Avoid
 repeating the same phrase across several headlines.
+
+`create_responsive_search_ad` can pin a headline to `HEADLINE_1`-`3` or a
+description to `DESCRIPTION_1`-`2` (`{"text": ..., "pin": "HEADLINE_1"}`),
+e.g. to keep a required disclaimer or the brand name in place. Pin as little
+as possible: every pin lowers ad strength and the combinations Google tests.
 
 ## Performance Max: `create_pmax_campaign`, `create_asset_group`
 

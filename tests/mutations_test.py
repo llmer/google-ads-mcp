@@ -22,7 +22,11 @@ from google.ads.googleads.errors import GoogleAdsException
 from google.ads.googleads.v25.errors.types.field_error import FieldErrorEnum
 
 import ads_mcp.mutations as mutations
-from tests.tools.ads_fakes import make_client
+from tests.tools.ads_fakes import (
+    MutateToolTestCase,
+    make_client,
+    policy_exception,
+)
 
 
 class TestMutationHelpers(unittest.TestCase):
@@ -146,6 +150,85 @@ class TestMutationHelpers(unittest.TestCase):
         self.assertIn("field_error.REQUIRED", message)
         self.assertIn("mutate_operations[1].campaign", message)
         self.assertIn("[operation: campaign 'X']", message)
+
+    def test_parse_composite_id(self):
+        self.assertEqual(
+            mutations.parse_composite_id("2~3", "1", "adGroupAds", "ad"),
+            ["2", "3"],
+        )
+        self.assertEqual(
+            mutations.parse_composite_id(
+                "customers/1/adGroupAds/2~3", "1", "adGroupAds", "ad"
+            ),
+            ["2", "3"],
+        )
+        with self.assertRaisesRegex(ToolError, "belongs to customer 9"):
+            mutations.parse_composite_id(
+                "customers/9/adGroupAds/2~3", "1", "adGroupAds", "ad"
+            )
+        with self.assertRaisesRegex(ToolError, "Expected customers"):
+            mutations.parse_composite_id(
+                "customers/1/campaigns/2", "1", "adGroupAds", "ad"
+            )
+
+    def test_last_id(self):
+        self.assertEqual(mutations.last_id("customers/1/adGroupAds/2~3"), "3")
+        self.assertEqual(mutations.last_id("customers/1/campaigns/5"), "5")
+
+
+class TestPolicyErrors(unittest.TestCase):
+
+    def test_policy_topics_and_violations_are_named(self):
+        client = make_client()
+        message = mutations.format_google_ads_exception(
+            policy_exception(client)
+        )
+        self.assertIn(
+            "Policy: DESTINATION_MISMATCH (PROHIBITED): 'example.org'", message
+        )
+        self.assertIn(
+            "Policy: Healthcare and medicines: 'cheap pills' (exemptible)",
+            message,
+        )
+        self.assertIn("policy_finding_error.POLICY_FINDING", message)
+
+    def test_errors_without_policy_details_are_unchanged(self):
+        client = make_client()
+        failure = client.get_type("GoogleAdsFailure")
+        error = client.get_type("GoogleAdsError")
+        error.message = "Too long."
+        failure.errors.append(error)
+        message = mutations.format_google_ads_exception(
+            GoogleAdsException(None, None, failure, "req-3")
+        )
+        self.assertNotIn("Policy", message)
+
+
+class TestFindAdGroup(MutateToolTestCase):
+
+    def test_by_ad_group_id_within_campaign(self):
+        self.search_results = [[{"ad_group.id": 7, "campaign.id": 5}]]
+        row = mutations.find_ad_group(self.client, "1", "7", 5)
+        self.assertEqual(row["ad_group.id"], 7)
+        self.assertIn("ad_group.id = 7", self.queries[0])
+        self.assertIn("campaign.id = 5", self.queries[0])
+        self.assertIn("ad_group.status != 'REMOVED'", self.queries[0])
+
+    def test_campaign_must_have_exactly_one_ad_group(self):
+        self.search_results = [[{"ad_group.id": 7}]]
+        row = mutations.find_ad_group(self.client, "1", None, 5)
+        self.assertEqual(row["ad_group.id"], 7)
+        self.search_results = [[{"ad_group.id": 7}, {"ad_group.id": 8}]]
+        with self.assertRaisesRegex(ToolError, "has 2 ad groups"):
+            mutations.find_ad_group(self.client, "1", None, 5)
+
+    def test_missing_ad_group_and_arguments(self):
+        with self.assertRaisesRegex(ToolError, "not found in campaign 5"):
+            mutations.find_ad_group(self.client, "1", 7, 5)
+        with self.assertRaisesRegex(ToolError, "Give ad_group_id"):
+            mutations.find_ad_group(self.client, "1", None, None)
+        with self.assertRaises(ToolError):
+            mutations.find_ad_group(self.client, "1", "7 OR 1=1", None)
 
 
 if __name__ == "__main__":

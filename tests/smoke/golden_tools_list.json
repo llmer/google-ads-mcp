@@ -10,6 +10,336 @@
         "destructiveHint": false,
         "readOnlyHint": false
       },
+      "description": "Adds Search assets (sitelinks, callouts, a structured snippet, a price asset,\nbusiness name, business logo and images) to one or more campaigns.\n\nAssets are created once and linked to every listed campaign, in one atomic\nrequest. An asset whose text (sitelink text, callout text, snippet header,\nprice type, business name) is already linked to a campaign is skipped for\nthat campaign, so the tool can be re-run safely.\n\nUpload the logo and images first with upload_logo and upload_image and\npass their asset IDs; the logo must be square (1:1), images landscape\n(1.91:1) or square.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "business_logo_asset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "ID of a square image asset to use as the business logo."
+          },
+          "business_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The advertiser name shown with the ad, max 25 characters."
+          },
+          "callouts": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Callout texts, max 25 characters each."
+          },
+          "campaign_ids": {
+            "description": "Campaigns to add the assets to.",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The Google Ads customer ID."
+          },
+          "image_asset_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "IDs of image assets to show with the ad."
+          },
+          "login_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional manager customer ID to use as the login-customer-id header."
+          },
+          "price": {
+            "anyOf": [
+              {
+                "description": "A price asset: 3-8 offerings of one type.",
+                "properties": {
+                  "currency_code": {
+                    "description": "ISO 4217, e.g. \"USD\".",
+                    "type": "string"
+                  },
+                  "items": {
+                    "items": {
+                      "description": "One price offering.",
+                      "properties": {
+                        "description": {
+                          "description": "Max 25 characters.",
+                          "type": "string"
+                        },
+                        "final_url": {
+                          "description": "Landing page for this offering.",
+                          "type": "string"
+                        },
+                        "header": {
+                          "description": "Max 25 characters.",
+                          "type": "string"
+                        },
+                        "price": {
+                          "description": "Price in the currency of the price asset.",
+                          "type": "number"
+                        },
+                        "unit": {
+                          "anyOf": [
+                            {
+                              "enum": [
+                                "PER_HOUR",
+                                "PER_DAY",
+                                "PER_WEEK",
+                                "PER_MONTH",
+                                "PER_YEAR",
+                                "PER_NIGHT"
+                              ],
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "default": null
+                        }
+                      },
+                      "required": [
+                        "header",
+                        "description",
+                        "price",
+                        "final_url"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "language_code": {
+                    "default": "en",
+                    "description": "e.g. \"en\".",
+                    "type": "string"
+                  },
+                  "qualifier": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "FROM",
+                          "UP_TO",
+                          "AVERAGE"
+                        ],
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "type": {
+                    "enum": [
+                      "BRANDS",
+                      "EVENTS",
+                      "LOCATIONS",
+                      "NEIGHBORHOODS",
+                      "PRODUCT_CATEGORIES",
+                      "PRODUCT_TIERS",
+                      "SERVICES",
+                      "SERVICE_CATEGORIES",
+                      "SERVICE_TIERS"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "currency_code",
+                  "items"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "A price asset with 3-8 items."
+          },
+          "sitelinks": {
+            "anyOf": [
+              {
+                "items": {
+                  "description": "A sitelink: an extra link under the ad.",
+                  "properties": {
+                    "description1": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "default": null,
+                      "description": "First description line, max 35 characters."
+                    },
+                    "description2": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "default": null,
+                      "description": "Second description line, max 35 characters. Give both lines or neither."
+                    },
+                    "final_url": {
+                      "description": "The link's landing page.",
+                      "type": "string"
+                    },
+                    "text": {
+                      "description": "Link text, max 25 characters.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "text",
+                    "final_url"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Sitelinks (Google shows up to 4-6; add at least 2)."
+          },
+          "structured_snippet": {
+            "anyOf": [
+              {
+                "description": "A structured snippet: a header and a list of values.",
+                "properties": {
+                  "header": {
+                    "description": "One of Google's headers, e.g. Styles, Types, Brands.",
+                    "type": "string"
+                  },
+                  "values": {
+                    "description": "3-10 values, max 25 characters each.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "header",
+                  "values"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "A header and 3-10 values."
+          },
+          "validate_only": {
+            "default": false,
+            "description": "If true, validates the request without changing anything.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "customer_id",
+          "campaign_ids"
+        ],
+        "type": "object"
+      },
+      "name": "assets_add_campaign_assets",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Assets Add Campaign Assets"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "readOnlyHint": false
+      },
       "description": "Adds an asset group to an existing Performance Max campaign.\n\nAn asset group is a set of creatives (text, images, logos, videos) plus a\nfinal URL and optional audience signals, which Google combines into ads.\nUpload images with upload_image / upload_logo first and pass their asset IDs.",
       "inputSchema": {
         "additionalProperties": false,
@@ -583,6 +913,142 @@
         "x-fastmcp-wrap-result": true
       },
       "title": "Assets List Assets"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Unlinks assets (sitelinks, callouts, snippets, prices...) from a campaign. The assets\nthemselves are kept, and add_campaign_assets can link them again.\n\nIdentify links by asset_ids in campaign_id, optionally only those of\nfield_type (by default every field type the asset is linked as), and/or\nby campaign_asset resource names\n(customers/<customer id>/campaignAssets/<campaign id>~<asset id>~<field type>).\nFind them with the search tool: resource campaign_asset, fields\ncampaign_asset.resource_name, campaign_asset.field_type, asset.id and\nasset.name. If any link is not found, nothing changes.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "asset_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "IDs of the assets to unlink from campaign_id."
+          },
+          "campaign_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The campaign of asset_ids."
+          },
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The Google Ads customer ID."
+          },
+          "field_type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "SITELINK",
+                  "CALLOUT",
+                  "STRUCTURED_SNIPPET",
+                  "PRICE",
+                  "PROMOTION",
+                  "CALL",
+                  "MOBILE_APP",
+                  "LEAD_FORM",
+                  "BUSINESS_NAME",
+                  "BUSINESS_LOGO",
+                  "AD_IMAGE"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Only unlink asset_ids linked as this field type."
+          },
+          "login_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional manager customer ID to use as the login-customer-id header."
+          },
+          "resource_names": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "campaign_asset resource names."
+          },
+          "validate_only": {
+            "default": false,
+            "description": "If true, validates the request without changing anything.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "customer_id"
+        ],
+        "type": "object"
+      },
+      "name": "assets_remove_campaign_assets",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Assets Remove Campaign Assets"
     },
     {
       "_meta": {
@@ -1494,6 +1960,215 @@
         "destructiveHint": false,
         "readOnlyHint": false
       },
+      "description": "Adds a responsive search ad to an existing Search ad group.\n\nGive ad_group_id, or campaign_id for a campaign with exactly one ad group.\nHeadlines and descriptions are strings, or {\"text\": ..., \"pin\": ...} to\npin one to a position (HEADLINE_1-3, DESCRIPTION_1-2). Pin sparingly:\npins limit the combinations Google can test.\n\nGoogle reviews every new ad. Policy problems are reported with their\npolicy topics, e.g. DESTINATION_NOT_WORKING; fix the text or URL rather\nthan retrying. validate_only checks the ad, policy included, without\ncreating it.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "ad_group_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The ad group to add the ad to."
+          },
+          "campaign_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "A campaign with exactly one ad group, instead of ad_group_id."
+          },
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The Google Ads customer ID."
+          },
+          "descriptions": {
+            "description": "2-4 descriptions, max 90 characters each.",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "description": "A responsive search ad description, optionally pinned to a position.",
+                  "properties": {
+                    "pin": {
+                      "anyOf": [
+                        {
+                          "enum": [
+                            "DESCRIPTION_1",
+                            "DESCRIPTION_2"
+                          ],
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "default": null,
+                      "description": "Always show the description in this position."
+                    },
+                    "text": {
+                      "description": "Max 90 characters.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "final_url": {
+            "description": "The landing page URL.",
+            "type": "string"
+          },
+          "headlines": {
+            "description": "3-15 headlines, max 30 characters each.",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "description": "A responsive search ad headline, optionally pinned to a position.",
+                  "properties": {
+                    "pin": {
+                      "anyOf": [
+                        {
+                          "enum": [
+                            "HEADLINE_1",
+                            "HEADLINE_2",
+                            "HEADLINE_3"
+                          ],
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "default": null,
+                      "description": "Always show the headline in this position."
+                    },
+                    "text": {
+                      "description": "Max 30 characters.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "login_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional manager customer ID to use as the login-customer-id header."
+          },
+          "path1": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional display URL path, max 15 characters."
+          },
+          "path2": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional second display URL path, max 15 characters; needs path1."
+          },
+          "status": {
+            "default": "ENABLED",
+            "description": "ENABLED serves the ad once approved, if its ad group and\ncampaign are enabled (it never enables them). PAUSED creates it paused.",
+            "enum": [
+              "ENABLED",
+              "PAUSED"
+            ],
+            "type": "string"
+          },
+          "validate_only": {
+            "default": false,
+            "description": "If true, validates the request without creating anything.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "customer_id",
+          "final_url",
+          "headlines",
+          "descriptions"
+        ],
+        "type": "object"
+      },
+      "name": "campaigns_create_responsive_search_ad",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Campaigns Create Responsive Search Ad"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "readOnlyHint": false
+      },
       "description": "Creates a Google Search campaign, with a budget, targeting, one ad group, keywords and a\nresponsive search ad, in a single atomic request. The campaign is created PAUSED.\n\nUse this to drive traffic to a website or web app. For mobile app installs\nuse create_app_campaign instead.\n\nLook up location IDs with find_geo_targets (e.g. 2840 = United States).\nCommon language IDs: 1000 English, 1003 Spanish, 1002 French, 1001 German.\n\nKeyword syntax: \"[running shoes]\" is exact match, '\"running shoes\"' is\nphrase match, and bare text uses keyword_match_type. Negative keywords use\nthe same syntax, with bare text meaning broad match.\n\nMonetary amounts (daily_budget, target_cpa, max_cpc) are in the account\ncurrency, e.g. 25.5 means 25.50 USD for a USD account.",
       "inputSchema": {
         "additionalProperties": false,
@@ -1684,7 +2359,7 @@
               }
             ],
             "default": null,
-            "description": "Max cost per click. Required for MANUAL_CPC (the ad group's\ndefault bid); optional bid ceiling for MAXIMIZE_CLICKS."
+            "description": "Max cost per click. Required for MANUAL_CPC (the ad group's\ndefault bid); bid ceiling for MAXIMIZE_CLICKS, required there when\nthe max_cpc_bid guardrail is set. Capped by max_cpc_bid."
           },
           "name": {
             "description": "The campaign name. Must be unique in the account.",
@@ -1800,7 +2475,7 @@
         "idempotentHint": true,
         "readOnlyHint": false
       },
-      "description": "Enables a campaign, so that it starts serving ads and SPENDING its budget.\n\nBefore enabling, review the campaign with get_campaign and the account's\ncurrent spend with get_spend_overview, and confirm with the user. Refused\nif it would break the spend guardrails configured on the server.",
+      "description": "Enables a campaign, so that it starts serving ads and SPENDING its budget.\n\nBefore enabling, review the campaign with get_campaign and the account's\ncurrent spend with get_spend_overview, and confirm with the user. Refused\nif it would break the spend guardrails configured on the server,\nincluding Manual CPC keyword bids above max_cpc_bid.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -2156,6 +2831,536 @@
         "idempotentHint": true,
         "readOnlyHint": false
       },
+      "description": "Pauses or enables ads. Never removes them.\n\nIdentify ads by ad_ids within ad_group_id, and/or by ad_group_ad resource\nnames (customers/<customer id>/adGroupAds/<ad group id>~<ad id>). Find\nthem with the search tool: resource ad_group_ad, fields\nad_group_ad.resource_name, ad_group_ad.ad.id and ad_group_ad.status. If\nany ad is not found, nothing changes. Enabling an ad does not enable its\nad group or campaign.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "ad_group_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The ad group of ad_ids."
+          },
+          "ad_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Ad IDs in ad_group_id."
+          },
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The Google Ads customer ID."
+          },
+          "login_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional manager customer ID to use as the login-customer-id header."
+          },
+          "resource_names": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "ad_group_ad resource names."
+          },
+          "status": {
+            "description": "ENABLED or PAUSED.",
+            "enum": [
+              "ENABLED",
+              "PAUSED"
+            ],
+            "type": "string"
+          },
+          "validate_only": {
+            "default": false,
+            "description": "If true, validates the request without changing anything.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "customer_id",
+          "status"
+        ],
+        "type": "object"
+      },
+      "name": "campaigns_set_ad_status",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Campaigns Set Ad Status"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Pauses (or re-enables) auto-applied recommendations for the whole account.\n\nAuto-apply lets Google change campaigns without review: add keywords,\nswitch to broad match, turn on Display expansion, change bidding\nstrategies or targets, and rewrite ads. These changes bypass this\nserver's spend guardrails, so pausing them is recommended for accounts\nmanaged through these tools.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The Google Ads customer ID."
+          },
+          "login_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional manager customer ID to use as the login-customer-id header."
+          },
+          "status": {
+            "default": "PAUSED",
+            "description": "PAUSED (default) or ENABLED.",
+            "enum": [
+              "PAUSED",
+              "ENABLED"
+            ],
+            "type": "string"
+          },
+          "types": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Recommendation types to change, e.g. [\"USE_BROAD_MATCH_KEYWORD\"].\nDefaults to every subscription currently in the other status."
+          },
+          "validate_only": {
+            "default": false,
+            "description": "If true, validates the request without changing anything.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "customer_id"
+        ],
+        "type": "object"
+      },
+      "name": "campaigns_set_auto_apply_recommendations",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Campaigns Set Auto Apply Recommendations"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Switches a campaign to a standard (non-portfolio) bidding strategy, or changes its target.\n\nThe strategy is replaced as a whole: a target that is not given is\ncleared, and a campaign using a portfolio strategy leaves it. Budget and\nstatus do not change. A new strategy restarts Smart Bidding's learning\nperiod, so confirm the change with the user first.\n\n  - MANUAL_CPC: you set the bids. default_cpc sets every ad group's\n    default max CPC in the same request; otherwise ad groups keep their\n    current bids (set_cpc_bids changes them later).\n  - MAXIMIZE_CLICKS: cpc_bid_ceiling caps the bid for each click.\n  - MAXIMIZE_CONVERSIONS: needs conversion tracking; optional target_cpa.\n  - MAXIMIZE_CONVERSION_VALUE: needs conversion values; optional target_roas.\n\ndefault_cpc and cpc_bid_ceiling above the max_cpc_bid guardrail are\nrefused. When that guardrail is set, MAXIMIZE_CLICKS needs a ceiling, and\nMANUAL_CPC is refused while stored bids above it would apply again:\nkeyword bids, or ad group default bids that default_cpc does not replace.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "bidding_strategy": {
+            "description": "The strategy to use.",
+            "enum": [
+              "MANUAL_CPC",
+              "MAXIMIZE_CLICKS",
+              "MAXIMIZE_CONVERSIONS",
+              "MAXIMIZE_CONVERSION_VALUE"
+            ],
+            "type": "string"
+          },
+          "campaign_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The campaign ID."
+          },
+          "cpc_bid_ceiling": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Maximum bid per click, for MAXIMIZE_CLICKS."
+          },
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The Google Ads customer ID."
+          },
+          "default_cpc": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Default max CPC for every ad group, for MANUAL_CPC."
+          },
+          "login_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional manager customer ID to use as the login-customer-id header."
+          },
+          "target_cpa": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Target cost per conversion, for MAXIMIZE_CONVERSIONS."
+          },
+          "target_roas": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Target return on ad spend as a ratio (3.5 = 350%), for\nMAXIMIZE_CONVERSION_VALUE."
+          },
+          "validate_only": {
+            "default": false,
+            "description": "If true, validates the request without changing anything.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "customer_id",
+          "campaign_id",
+          "bidding_strategy"
+        ],
+        "type": "object"
+      },
+      "name": "campaigns_set_bidding_strategy",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Campaigns Set Bidding Strategy"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Sets manual CPC bids for a Search campaign's ad group and keywords.\n\nFor Manual CPC campaigns with one ad group (as created by\ncreate_search_campaign). Bids are in the account currency. Higher bids\nraise cost per click but never the budget; bids above the max_cpc_bid\nguardrail are refused.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "campaign_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The campaign ID."
+          },
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The Google Ads customer ID."
+          },
+          "default_cpc": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The ad group's default max CPC, used by keywords without\ntheir own bid."
+          },
+          "keyword_bids": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Keyword-level max CPC, keyed by keyword in match type\nsyntax: \"[baby name app]\" exact, '\"baby name app\"' phrase, bare text\nbroad. Use 0 to clear a keyword bid (fall back to default_cpc)."
+          },
+          "login_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional manager customer ID to use as the login-customer-id header."
+          },
+          "validate_only": {
+            "default": false,
+            "description": "If true, validates the request without changing anything.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "customer_id",
+          "campaign_id"
+        ],
+        "type": "object"
+      },
+      "name": "campaigns_set_cpc_bids",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Campaigns Set Cpc Bids"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Renames an ad group, or pauses or enables it. Never removes it.\n\nEnabling an ad group does not enable its campaign. In a Manual CPC\ncampaign, enabling is refused while its keywords' bids are above the\nmax_cpc_bid guardrail. Change its default bid with set_cpc_bids.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "ad_group_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The ad group ID (see get_campaign)."
+          },
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The Google Ads customer ID."
+          },
+          "login_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional manager customer ID to use as the login-customer-id header."
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "A new name, unique within the campaign."
+          },
+          "status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "ENABLED",
+                  "PAUSED"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "ENABLED or PAUSED."
+          },
+          "validate_only": {
+            "default": false,
+            "description": "If true, validates the request without changing anything.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "customer_id",
+          "ad_group_id"
+        ],
+        "type": "object"
+      },
+      "name": "campaigns_update_ad_group",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Campaigns Update Ad Group"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
       "description": "Changes the average daily budget of a campaign.\n\nRead the campaign first (get_campaign, or get_spend_overview for the whole\naccount) and confirm budget increases with the user. Google may spend up\nto 2x the daily budget on a given day, but charges at most 30.4x it per month.\n\nIf the campaign's budget is shared with other campaigns, the change affects\nall of them; this is refused unless allow_shared_budget is true. Spend\nguardrails configured on the server (max budget per campaign, max total\ndaily budget of enabled campaigns, max increase per change) are enforced.",
       "inputSchema": {
         "additionalProperties": false,
@@ -2225,6 +3430,205 @@
         "type": "object"
       },
       "title": "Campaigns Update Budget"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Updates campaign settings that are not about budget, bidding or targeting lists.\n\nOnly the given settings are changed. None of them can raise a budget or\nenable the campaign. Adding networks spreads the same budget over more\nplacements.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "campaign_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The campaign ID."
+          },
+          "clear_end_date": {
+            "default": false,
+            "description": "Remove the end date, so the campaign runs\nindefinitely. Refused like end_date for an ended enabled campaign.",
+            "type": "boolean"
+          },
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The Google Ads customer ID."
+          },
+          "device_bid_adjustments": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Percent bid adjustments by device, e.g.\n{\"DESKTOP\": -50, \"TABLET\": -30, \"MOBILE\": 0}. -100 stops showing\nads on that device. Range -100 to +100. Manual CPC and enhanced\nbidding use them; most Smart Bidding strategies ignore them."
+          },
+          "end_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The campaign's last day, YYYY-MM-DD, in the account time\nzone. Refused for an enabled campaign that has already ended, since\nit would restart spending: pause it, change the date, then use\nenable_campaign."
+          },
+          "final_url_expansion": {
+            "anyOf": [
+              {
+                "enum": [
+                  "OPTED_IN",
+                  "OPTED_OUT"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "OPTED_OUT stops Google from sending clicks to\nother pages of the site than the ad's final URL."
+          },
+          "location_targeting": {
+            "anyOf": [
+              {
+                "enum": [
+                  "PRESENCE",
+                  "PRESENCE_OR_INTEREST"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "PRESENCE shows ads only to people in or regularly\nin the targeted locations; PRESENCE_OR_INTEREST (Google's default)\nalso includes people interested in them."
+          },
+          "login_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional manager customer ID to use as the login-customer-id header."
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "A new campaign name, unique in the account."
+          },
+          "target_content_network": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Whether a Search campaign's ads also show on\nthe Display Network (Display expansion)."
+          },
+          "target_google_search": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Whether ads show on Google Search."
+          },
+          "target_search_network": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Whether ads also show on Google search partner\nsites (needs target_google_search)."
+          },
+          "text_asset_automation": {
+            "anyOf": [
+              {
+                "enum": [
+                  "OPTED_IN",
+                  "OPTED_OUT"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "OPTED_OUT stops Google from generating\nheadlines and descriptions from the landing page (Search, PMax)."
+          },
+          "validate_only": {
+            "default": false,
+            "description": "If true, validates the request without changing anything.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "customer_id",
+          "campaign_id"
+        ],
+        "type": "object"
+      },
+      "name": "campaigns_update_campaign_settings",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Campaigns Update Campaign Settings"
     },
     {
       "_meta": {
@@ -2516,6 +3920,85 @@
         "x-fastmcp-wrap-result": true
       },
       "title": "Conversions List Conversion Actions"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Chooses which conversion goals a campaign optimizes for and reports as Conversions.\n\nEach goal is a conversion category and origin, written \"CATEGORY:ORIGIN\",\ne.g. \"PURCHASE:WEBSITE\" or \"DOWNLOAD:APP\". Listed goals become biddable\nfor the campaign; every other goal the campaign has is set to not\nbiddable. This is the campaign-level override of the account-default\ngoals, useful when one account runs several businesses or apps.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "biddable_goals": {
+            "description": "Goals to optimize for, as \"CATEGORY:ORIGIN\".",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "campaign_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The campaign ID."
+          },
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The Google Ads customer ID."
+          },
+          "login_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional manager customer ID to use as the login-customer-id header."
+          },
+          "validate_only": {
+            "default": false,
+            "description": "If true, validates the request without changing anything.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "customer_id",
+          "campaign_id",
+          "biddable_goals"
+        ],
+        "type": "object"
+      },
+      "name": "conversions_set_campaign_conversion_goals",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Conversions Set Campaign Conversion Goals"
     },
     {
       "_meta": {
@@ -2908,6 +4391,101 @@
         }
       },
       "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Updates account-level click tracking: the final URL suffix, tracking template\nand auto-tagging. Only the given fields change.\n\nThe final URL suffix is appended to every ad's landing page URL and\ncommonly carries UTM parameters with ValueTrack placeholders, e.g.\n\"utm_source=google&utm_medium=cpc&utm_campaign={campaignid}\". Pass an\nempty string to clear a field. Auto-tagging adds the gclid used for\nconversion tracking and offline conversion uploads.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "auto_tagging_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Whether to add the gclid to ad clicks."
+          },
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The Google Ads customer ID."
+          },
+          "final_url_suffix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Query string appended to landing page URLs, without \"?\"."
+          },
+          "login_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional manager customer ID to use as the login-customer-id header."
+          },
+          "tracking_url_template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Tracking template, e.g. \"{lpurl}?src=ads\"."
+          },
+          "validate_only": {
+            "default": false,
+            "description": "If true, validates the request without changing anything.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "customer_id"
+        ],
+        "type": "object"
+      },
+      "name": "customers_update_account_tracking",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Customers Update Account Tracking"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
         "readOnlyHint": true
       },
       "description": "Retrieves the selectable, filterable, and sortable fields for a specific Google Ads resource,\nincluding compatible metrics and segments.\n\nUse this tool to find out which fields you can select, filter by, or sort by\nwhen querying a specific resource (e.g., 'campaign', 'ad_group').\nThis tool also returns metrics and segments that can be selected with the resource.\nTheir names start with 'metrics.' and 'segments.' respectively.\n\nDo not guess fields, you MUST use this tool to discover them before constructing a query for the\n`search` tool.\n\nThe responses of this tool should be cached, as they don't change frequently.",
@@ -2955,13 +4533,12 @@
       "annotations": {
         "readOnlyHint": true
       },
-      "description": "Fetches data from the Google Ads API using the search method",
+      "description": "Fetches data from the Google Ads API using the search method\n\n    Args:\n        customer_id: The id of the customer\n        fields: The fields to fetch\n        resource: The resource to return fields from\n        conditions: List of conditions to filter the data, combined using AND clauses\n        orderings: How the data is ordered\n        limit: The maximum number of rows to return\n        login_customer_id: Optional manager customer ID to use as the login-customer-id header.\n\n    \n\n### Hints\n    Language Grammar can be found at https://developers.google.com/google-ads/api/docs/query/grammar\n    All resources and descriptions are found at https://developers.google.com/google-ads/api/fields/latest/overview\n    If the query fails, a ToolError will be raised with the error details.\n\n    For Conversion issues try looking in offline_conversion_upload_conversion_action_summary\n\n### Hint for customer_id\n    should be a string of numbers without punctuation\n    if presented in the form 123-456-7890 remove the hyphens and use 1234567890\n\n### Hints for Dates\n    All dates should be in the form YYYY-MM-DD and must include the dashes (-)\n    Date ranges must be finite and must include a start and end date\n\n### Hints for limits\n    Requests to resource change_event must specify a LIMIT of less than or equal to 10000\n\n### Hints for conversions questions\n    https://developers.google.com/google-ads/api/docs/conversions/upload-summaries \n\n\n### Hints for all resources\n    To find out which specific fields (including compatible metrics and segments) you can select, filter by, or sort by for a given resource, you MUST use the `get_resource_metadata` tool.\n    Do not guess the fields. Use the tool to look them up.\n    Once you have the fields, ensure the whole field name is used (e.g., 'campaign.id', not just 'id'). Wildcards and partial fields are not allowed.\n\n### Valid resources\n    What follows is a list of valid resources that can be queried.\n    accessible_bidding_strategy\naccount_budget\naccount_budget_proposal\naccount_link\nad\nad_group\nad_group_ad\nad_group_ad_asset_combination_view\nad_group_ad_asset_view\nad_group_ad_label\nad_group_asset\nad_group_asset_set\nad_group_audience_view\nad_group_bid_modifier\nad_group_criterion\nad_group_criterion_customizer\nad_group_criterion_label\nad_group_criterion_simulation\nad_group_customizer\nad_group_label\nad_group_simulation\nad_parameter\nad_schedule_view\nage_range_view\nai_max_search_term_ad_combination_view\nandroid_privacy_shared_key_google_ad_group\nandroid_privacy_shared_key_google_campaign\nandroid_privacy_shared_key_google_network_type\napp_top_combination_view\napplied_incentive\nasset\nasset_field_type_view\nasset_group\nasset_group_asset\nasset_group_listing_group_filter\nasset_group_product_group_view\nasset_group_signal\nasset_group_top_combination_view\nasset_set\nasset_set_asset\nasset_set_type_view\naudience\nbatch_job\nbidding_data_exclusion\nbidding_seasonality_adjustment\nbidding_strategy\nbidding_strategy_simulation\nbilling_setup\ncall_view\ncampaign\ncampaign_aggregate_asset_view\ncampaign_asset\ncampaign_asset_set\ncampaign_audience_view\ncampaign_bid_modifier\ncampaign_budget\ncampaign_conversion_goal\ncampaign_criterion\ncampaign_customizer\ncampaign_draft\ncampaign_goal_config\ncampaign_group\ncampaign_label\ncampaign_search_term_insight\ncampaign_search_term_view\ncampaign_shared_set\ncampaign_simulation\ncarrier_constant\ncart_data_sales_view\nchange_event\nchange_status\nchannel_aggregate_asset_view\nclick_view\ncombined_audience\ncontent_criterion_view\nconversion_action\nconversion_custom_variable\nconversion_goal_campaign_config\nconversion_value_rule\nconversion_value_rule_set\ncurrency_constant\ncustom_audience\ncustom_conversion_goal\ncustom_interest\ncustomer\ncustomer_asset\ncustomer_asset_set\ncustomer_client\ncustomer_client_link\ncustomer_conversion_goal\ncustomer_customizer\ncustomer_label\ncustomer_manager_link\ncustomer_negative_criterion\ncustomer_search_term_insight\ncustomer_user_access\ncustomer_user_access_invitation\ncustomizer_attribute\ndata_link\ndetail_content_suitability_placement_view\ndetail_placement_view\ndetailed_demographic\ndisplay_keyword_view\ndistance_view\ndomain_category\ndynamic_search_ads_search_term_view\nexpanded_landing_page_view\nexperiment\nexperiment_arm\nfinal_url_expansion_asset_view\ngender_view\ngeo_target_constant\ngeographic_view\ngoal\ngroup_content_suitability_placement_view\ngroup_placement_view\nhotel_group_view\nhotel_performance_view\nhotel_reconciliation\nincome_range_view\nkeyword_plan\nkeyword_plan_ad_group\nkeyword_plan_ad_group_keyword\nkeyword_plan_campaign\nkeyword_plan_campaign_keyword\nkeyword_theme_constant\nkeyword_view\nlabel\nlanding_page_view\nlanguage_constant\nlead_form_submission_data\nlife_event\nlocal_services_employee\nlocal_services_lead\nlocal_services_lead_conversation\nlocal_services_verification_artifact\nlocation_interest_view\nlocation_view\nmanaged_placement_view\nmatched_location_interest_view\nmedia_file\nmobile_app_category_constant\nmobile_device_constant\nmulti_party_auth_review\noffline_conversion_upload_client_summary\noffline_conversion_upload_conversion_action_summary\noffline_user_data_job\noperating_system_version_constant\npaid_organic_search_term_view\nparental_status_view\nper_store_view\nperformance_max_placement_view\nproduct_category_constant\nproduct_group_view\nproduct_link\nproduct_link_invitation\nqualifying_question\nrecommendation\nrecommendation_subscription\nremarketing_action\nsearch_term_view\nshared_criterion\nshared_set\nshopping_performance_view\nshopping_product\nsmart_campaign_search_term_view\nsmart_campaign_setting\ntargeting_expansion_view\nthird_party_app_analytics_link\ntopic_constant\ntopic_view\ntravel_activity_group_view\ntravel_activity_performance_view\nuser_interest\nuser_list\nuser_list_customer_type\nuser_location_view\nvideo\nvideo_enhancement\nwebpage_view\nyou_tube_video_upload",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "conditions": {
             "default": [],
-            "description": "List of conditions to filter the data, combined using AND clauses",
             "items": {
               "type": "string"
             },
@@ -2975,11 +4552,9 @@
               {
                 "type": "integer"
               }
-            ],
-            "description": "The id of the customer"
+            ]
           },
           "fields": {
-            "description": "The fields to fetch",
             "items": {
               "type": "string"
             },
@@ -2994,8 +4569,7 @@
                 "type": "null"
               }
             ],
-            "default": null,
-            "description": "The maximum number of rows to return"
+            "default": null
           },
           "login_customer_id": {
             "anyOf": [
@@ -3009,19 +4583,16 @@
                 "type": "null"
               }
             ],
-            "default": null,
-            "description": "Optional manager customer ID to use as the login-customer-id header."
+            "default": null
           },
           "orderings": {
             "default": [],
-            "description": "How the data is ordered",
             "items": {
               "type": "string"
             },
             "type": "array"
           },
           "resource": {
-            "description": "The resource to return fields from",
             "type": "string"
           }
         },
@@ -3050,6 +4621,128 @@
         "x-fastmcp-wrap-result": true
       },
       "title": "Search Search"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Adds keywords to an existing Search ad group, skipping keywords it already has.\n\nGive ad_group_id, or campaign_id for a campaign with exactly one ad group.\nKeyword syntax: \"[running shoes]\" is exact match, '\"running shoes\"' is\nphrase match, and bare text uses match_type. A keyword with the same text\nand match type as an existing one (enabled or paused) is skipped and\nreported; set_keyword_status re-enables paused ones. New keywords are\nenabled, so in an enabled campaign they can start spending right away.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "ad_group_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The ad group to add the keywords to."
+          },
+          "campaign_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "A campaign with exactly one ad group, instead of ad_group_id."
+          },
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The Google Ads customer ID."
+          },
+          "keyword_bids": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional max CPC per keyword, keyed as in keywords, for\nManual CPC campaigns. Other keywords use the ad group's default\nbid. Both are capped by the max_cpc_bid guardrail."
+          },
+          "keywords": {
+            "description": "Keywords in match type syntax.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "login_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional manager customer ID to use as the login-customer-id header."
+          },
+          "match_type": {
+            "default": "BROAD",
+            "description": "Match type of keywords written without [ ] or quotes.",
+            "enum": [
+              "BROAD",
+              "PHRASE",
+              "EXACT"
+            ],
+            "type": "string"
+          },
+          "validate_only": {
+            "default": false,
+            "description": "If true, validates the request without changing anything.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "customer_id",
+          "keywords"
+        ],
+        "type": "object"
+      },
+      "name": "targeting_add_keywords",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Targeting Add Keywords"
     },
     {
       "_meta": {
@@ -3137,6 +4830,58 @@
       "annotations": {
         "readOnlyHint": true
       },
+      "description": "Lists the account-level exclusions, which apply to every campaign in the account.\n\nThese are the only placement and content exclusions App campaigns honour.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The Google Ads customer ID."
+          },
+          "login_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional manager customer ID to use as the login-customer-id header."
+          }
+        },
+        "required": [
+          "customer_id"
+        ],
+        "type": "object"
+      },
+      "name": "targeting_list_account_exclusions",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Targeting List Account Exclusions"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true
+      },
       "description": "Lists the account's audiences, whose IDs can be used as Performance Max audience signals.\n\nAudiences are created in the Google Ads UI (Tools > Audience manager) and\ncombine your data segments (e.g. app users, site visitors), interests and\ndemographics.",
       "inputSchema": {
         "additionalProperties": false,
@@ -3191,6 +4936,157 @@
         "x-fastmcp-wrap-result": true
       },
       "title": "Targeting List Audiences"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Sets account-level exclusions, which stop ads in every campaign from showing there.\n\nApp campaigns take placement and content exclusions only at the account\nlevel, so this is how to keep their Display and YouTube traffic off\nlow-quality sites and apps. Exclusions only narrow where ads show; they\nnever raise spend. Read the current ones with list_account_exclusions.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "content_labels": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Content types to exclude, e.g. \"SEXUALLY_SUGGESTIVE\",\n\"PROFANITY\", \"TRAGEDY\", \"JUVENILE\", \"BELOW_THE_FOLD\",\n\"PARKED_DOMAIN\", \"EMBEDDED_VIDEO\", \"LIVE_STREAMING_VIDEO\"."
+          },
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The Google Ads customer ID."
+          },
+          "login_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional manager customer ID to use as the login-customer-id header."
+          },
+          "mobile_app_categories": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Mobile app category IDs; find them by querying\nthe `mobile_app_category_constant` resource with the search tool."
+          },
+          "mobile_apps": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Apps to exclude, as \"2-<package name>\" for Android\n(e.g. \"2-com.example.game\") or \"1-<App Store ID>\" for iOS."
+          },
+          "mode": {
+            "default": "add",
+            "description": "add, remove or replace. With replace, only the kinds given are\nreplaced: exclusions of a kind not passed are left alone.",
+            "enum": [
+              "add",
+              "remove",
+              "replace"
+            ],
+            "type": "string"
+          },
+          "placements": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Websites to exclude, e.g. \"example.com\"."
+          },
+          "validate_only": {
+            "default": false,
+            "description": "If true, validates the request without changing anything.",
+            "type": "boolean"
+          },
+          "youtube_channels": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "YouTube channel IDs, e.g. \"UCxxxxxxxxxxxxxxxxxxxxxx\"."
+          }
+        },
+        "required": [
+          "customer_id"
+        ],
+        "type": "object"
+      },
+      "name": "targeting_set_account_exclusions",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Targeting Set Account Exclusions"
     },
     {
       "_meta": {
@@ -3434,6 +5330,141 @@
         "type": "object"
       },
       "title": "Targeting Set Geo Targets"
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Pauses or enables ad group keywords. Never removes them.\n\nSelect keywords by text in match type syntax (\"[running shoes]\" exact,\n'\"running shoes\"' phrase, bare text broad) within ad_group_id or\ncampaign_id (all its ad groups), and/or by criterion ID. Criterion IDs\nare only unique within an ad group: give ad_group_id or campaign_id with\nthem, or write them as \"<ad group id>~<criterion id>\". Find IDs with the\nsearch tool (resource ad_group_criterion). If any keyword is not found,\nnothing changes. Enabling a keyword does not enable its ad group or\ncampaign, and in Manual CPC campaigns is refused while its bid is above\nthe max_cpc_bid guardrail.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "ad_group_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Only change keywords of this ad group."
+          },
+          "campaign_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Only change keywords of this campaign."
+          },
+          "criterion_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Keyword criterion IDs, \"<ad group id>~<criterion id>\"\npairs, or ad_group_criterion resource names."
+          },
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "description": "The Google Ads customer ID."
+          },
+          "keywords": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Keywords in match type syntax."
+          },
+          "login_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional manager customer ID to use as the login-customer-id header."
+          },
+          "status": {
+            "description": "ENABLED or PAUSED.",
+            "enum": [
+              "ENABLED",
+              "PAUSED"
+            ],
+            "type": "string"
+          },
+          "validate_only": {
+            "default": false,
+            "description": "If true, validates the request without changing anything.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "customer_id",
+          "status"
+        ],
+        "type": "object"
+      },
+      "name": "targeting_set_keyword_status",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Targeting Set Keyword Status"
     },
     {
       "_meta": {

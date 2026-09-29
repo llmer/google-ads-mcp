@@ -100,6 +100,61 @@ class TestChecks(unittest.TestCase):
         # Reductions are allowed even when already over the limit.
         guardrails.check_total_daily_budget(limits, {"b/1": 150.0}, "b/1", 120)
 
+    def test_check_effective_cpc_bids(self):
+        limits = guardrails.SpendLimits(max_cpc_bid=2.0)
+        guardrails.check_effective_cpc_bids(
+            limits, [("a", 2.0), ("b", None), ("c", 0)], "enabling"
+        )
+        # Labels may repeat; every bid is checked.
+        with self.assertRaisesRegex(
+            ToolError,
+            r"enabling would make CPC bids above the configured max_cpc_bid "
+            r"of 2.0 apply \(b: 2.5\). Lower them.",
+        ):
+            guardrails.check_effective_cpc_bids(
+                limits, [("b", 2.5), ("b", 1.0)], "enabling", "Lower them."
+            )
+        guardrails.check_effective_cpc_bids(
+            guardrails.SpendLimits(), [("a", 100.0)], "enabling"
+        )
+
+    @patch("ads_mcp.mutations.search")
+    def test_check_serving_cpc_bids(self, search):
+        search.return_value = [
+            {
+                "ad_group.id": 7,
+                "ad_group_criterion.criterion_id": 9,
+                "ad_group_criterion.type": "WEBPAGE",
+                "ad_group_criterion.effective_cpc_bid_micros": 2_500_000,
+            }
+        ]
+        with self.assertRaisesRegex(
+            ToolError, r"\(webpage 9 in ad group 7: 2.5\)"
+        ):
+            guardrails.check_serving_cpc_bids(
+                "client",
+                "1",
+                guardrails.SpendLimits(max_cpc_bid=2.0),
+                ["ad_group.id = 7"],
+                "enabling",
+            )
+        query = search.call_args.args[2]
+        self.assertIn(
+            "campaign.bidding_strategy_type IN ('MANUAL_CPC', 'ENHANCED_CPC')",
+            query,
+        )
+        # Every positive criterion type with a bid counts, e.g. listing groups.
+        self.assertNotIn("ad_group_criterion.type IN", query)
+        self.assertIn("ad_group_criterion.status = 'ENABLED'", query)
+        self.assertTrue(query.endswith(" AND ad_group.id = 7"))
+
+        # Without the guardrail nothing is read.
+        search.reset_mock()
+        guardrails.check_serving_cpc_bids(
+            "client", "1", guardrails.SpendLimits(), ["x"], "enabling"
+        )
+        search.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

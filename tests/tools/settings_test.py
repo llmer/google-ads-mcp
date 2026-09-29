@@ -89,6 +89,101 @@ class TestUpdateCampaignSettings(MutateToolTestCase):
         with self.assertRaises(ToolError):
             campaigns.update_campaign_settings("1", 5)
 
+    def _campaign(self, status="ENABLED", serving_status="SERVING"):
+        return [
+            {
+                "campaign.status": status,
+                "campaign.serving_status": serving_status,
+                "campaign.end_date_time": "2026-10-31 23:59:59",
+            }
+        ]
+
+    def test_sets_name_networks_and_end_date(self):
+        self.search_results = [self._campaign()]
+        result = campaigns.update_campaign_settings(
+            "1",
+            5,
+            name=" Search - Brand ",
+            target_google_search=True,
+            target_search_network=False,
+            target_content_network=False,
+            end_date="2026-12-31",
+        )
+        [[op]] = self.mutate_calls()
+        campaign = op.campaign_operation.update
+        self.assertEqual(campaign.resource_name, "customers/1/campaigns/5")
+        self.assertEqual(campaign.name, "Search - Brand")
+        self.assertTrue(campaign.network_settings.target_google_search)
+        self.assertFalse(campaign.network_settings.target_search_network)
+        # False is sent explicitly, not left unset.
+        self.assertIn("target_content_network", campaign.network_settings)
+        self.assertEqual(campaign.end_date_time, "2026-12-31 23:59:59")
+        self.assertEqual(
+            list(op.campaign_operation.update_mask.paths),
+            [
+                "name",
+                "network_settings.target_google_search",
+                "network_settings.target_search_network",
+                "network_settings.target_content_network",
+                "end_date_time",
+            ],
+        )
+        # Only the campaign's status is read, for the end date.
+        [query] = self.queries
+        self.assertIn("campaign.serving_status", query)
+        self.assertEqual(result["changed"]["end_date"], "2026-12-31")
+        self.assertEqual(
+            result["previous_end_date_time"], "2026-10-31 23:59:59"
+        )
+        self.assertFalse(result["validate_only"])
+
+    def test_other_settings_read_nothing(self):
+        campaigns.update_campaign_settings("1", 5, name="Search - Generic")
+        self.assertEqual(self.queries, [])
+        [[op]] = self.mutate_calls()
+        self.assertEqual(
+            list(op.campaign_operation.update_mask.paths), ["name"]
+        )
+
+    def test_refuses_to_restart_an_ended_enabled_campaign(self):
+        for kwargs in [{"end_date": "2027-01-31"}, {"clear_end_date": True}]:
+            self.search_results = [self._campaign("ENABLED", "ENDED")]
+            with self.assertRaisesRegex(ToolError, "restart its spending"):
+                campaigns.update_campaign_settings("1", 5, **kwargs)
+        self.service.mutate.assert_not_called()
+        # A paused campaign only restarts through enable_campaign.
+        self.search_results = [self._campaign("PAUSED", "ENDED")]
+        campaigns.update_campaign_settings("1", 5, end_date="2027-01-31")
+        self.assertEqual(len(self.mutate_calls()), 1)
+
+    def test_clear_end_date_masks_the_unset_field(self):
+        self.search_results = [self._campaign()]
+        result = campaigns.update_campaign_settings(
+            "1", 5, clear_end_date=True, validate_only=True
+        )
+        [[op]] = self.mutate_calls()
+        campaign = op.campaign_operation.update
+        self.assertNotIn("end_date_time", campaign)
+        self.assertEqual(
+            list(op.campaign_operation.update_mask.paths), ["end_date_time"]
+        )
+        self.assertTrue(
+            self.service.mutate.call_args.kwargs["request"].validate_only
+        )
+        self.assertEqual(result["changed"], {"end_date": None})
+        self.assertTrue(result["validate_only"])
+
+    def test_rejects_bad_name_and_end_date(self):
+        for kwargs in [
+            {"name": "  "},
+            {"end_date": "12/31/2026"},
+            {"end_date": ""},
+            {"end_date": "2026-12-31", "clear_end_date": True},
+        ]:
+            with self.assertRaises(ToolError, msg=kwargs):
+                campaigns.update_campaign_settings("1", 5, **kwargs)
+        self.service.mutate.assert_not_called()
+
 
 class TestUpdateAccountTracking(MutateToolTestCase):
 
@@ -326,6 +421,51 @@ class TestSetCpcBids(MutateToolTestCase):
         self.search_results = [[self._group("MAXIMIZE_CONVERSIONS")]]
         with self.assertRaises(ToolError):
             campaigns.set_cpc_bids("1", 5, default_cpc=0.3)
+
+    def test_clearing_a_keyword_bid_masks_the_unset_field(self):
+        keyword = {
+            "ad_group_criterion.resource_name": "customers/1/adGroupCriteria/7~9",
+            "ad_group_criterion.keyword.text": "running shoes",
+            "ad_group_criterion.keyword.match_type": "EXACT",
+            "ad_group_criterion.cpc_bid_micros": 900_000,
+        }
+        self.search_results = [[self._group()], [keyword]]
+        result = campaigns.set_cpc_bids(
+            "1", 5, keyword_bids={"[running shoes]": 0}
+        )
+        [[op]] = self.mutate_calls()
+        update = op.ad_group_criterion_operation
+        self.assertNotIn("cpc_bid_micros", update.update)
+        self.assertEqual(list(update.update_mask.paths), ["cpc_bid_micros"])
+        self.assertIsNone(result["keywords"]["[running shoes]"]["after"])
+
+    def test_clearing_refused_when_the_default_bid_is_above_the_limit(self):
+        from ads_mcp import guardrails
+        from unittest.mock import patch
+
+        keyword = {
+            "ad_group_criterion.resource_name": "customers/1/adGroupCriteria/7~9",
+            "ad_group_criterion.keyword.text": "running shoes",
+            "ad_group_criterion.keyword.match_type": "EXACT",
+            "ad_group_criterion.cpc_bid_micros": 900_000,
+        }
+        group = {**self._group(), "ad_group.cpc_bid_micros": 3_000_000}
+        with patch.object(
+            guardrails,
+            "get_limits",
+            return_value=guardrails.SpendLimits(max_cpc_bid=2.0),
+        ):
+            self.search_results = [[group], [keyword]]
+            with self.assertRaisesRegex(ToolError, "clearing these keyword"):
+                campaigns.set_cpc_bids(
+                    "1", 5, keyword_bids={"[running shoes]": 0}
+                )
+            self.service.mutate.assert_not_called()
+            self.search_results = [[group], [keyword]]
+            campaigns.set_cpc_bids(
+                "1", 5, default_cpc=1.0, keyword_bids={"[running shoes]": 0}
+            )
+        self.assertEqual(len(self.mutate_calls()), 1)
 
     def test_unknown_keyword_is_an_error(self):
         self.search_results = [[self._group()], []]

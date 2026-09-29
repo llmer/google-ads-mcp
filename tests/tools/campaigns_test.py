@@ -22,7 +22,7 @@ from unittest.mock import patch
 
 import ads_mcp.guardrails as guardrails
 from ads_mcp.tools import campaigns
-from tests.tools.ads_fakes import MutateToolTestCase
+from tests.tools.ads_fakes import MutateToolTestCase, policy_exception
 
 _HEADLINES = ["Track spending", "Budget in minutes", "Free budget app"]
 _LONG_HEADLINES = ["The budgeting app that does the math for you"]
@@ -444,6 +444,41 @@ class TestSpendGuardrails(MutateToolTestCase):
             )
         self.service.mutate.assert_not_called()
 
+    def _create_search(self, **kwargs):
+        return campaigns.create_search_campaign(
+            "1",
+            "C",
+            10,
+            "https://example.com",
+            _HEADLINES,
+            _DESCRIPTIONS,
+            ["kw"],
+            **kwargs,
+        )
+
+    def test_create_refuses_cpc_above_max_cpc_bid(self):
+        self.limits = guardrails.SpendLimits(max_cpc_bid=2.0)
+        with self.assertRaisesRegex(ToolError, "max_cpc_bid of 2.0"):
+            self._create_search(bidding_strategy="MANUAL_CPC", max_cpc=2.5)
+        with self.assertRaisesRegex(ToolError, "max_cpc_bid of 2.0"):
+            self._create_search(bidding_strategy="MAXIMIZE_CLICKS", max_cpc=3)
+        self.service.mutate.assert_not_called()
+
+        self._create_search(bidding_strategy="MANUAL_CPC", max_cpc=2.0)
+        [operations] = self.mutate_calls()
+        [ad_group] = self.created(operations, "ad_group_operation")
+        self.assertEqual(ad_group.cpc_bid_micros, 2_000_000)
+
+    def test_create_maximize_clicks_needs_ceiling_under_max_cpc_bid(self):
+        self.limits = guardrails.SpendLimits(max_cpc_bid=2.0)
+        with self.assertRaisesRegex(ToolError, "needs a CPC bid ceiling"):
+            self._create_search(bidding_strategy="MAXIMIZE_CLICKS")
+        # Other strategies have no per-click limit to check.
+        self._create_search(bidding_strategy="MAXIMIZE_CONVERSIONS")
+        self.limits = guardrails.SpendLimits()
+        self._create_search(bidding_strategy="MAXIMIZE_CLICKS")
+        self.assertEqual(len(self.mutate_calls()), 2)
+
     def test_update_budget_refuses_large_increase(self):
         self.limits = guardrails.SpendLimits(max_budget_increase_percent=50)
         self.search_results = [[self._budget_row(10)]]
@@ -474,6 +509,24 @@ class TestSpendGuardrails(MutateToolTestCase):
         with self.assertRaisesRegex(ToolError, "from 80.00 to 110.00"):
             campaigns.enable_campaign("1", 5)
         self.service.mutate.assert_not_called()
+
+    def test_enable_refuses_manual_cpc_bids_above_max_cpc_bid(self):
+        self.limits = guardrails.SpendLimits(max_cpc_bid=2.0)
+        self.search_results = [
+            [self._budget_row(10)],
+            self._enabled(20),
+            [_criterion_bid(7, "running shoes", "EXACT", 2.5)],
+        ]
+        with self.assertRaisesRegex(
+            ToolError, r"enabling this campaign .*\[running shoes\]"
+        ):
+            campaigns.enable_campaign("1", 5)
+        self.assertIn("campaign.id = 5", self.queries[-1])
+        self.assertIn("ad_group.status = 'ENABLED'", self.queries[-1])
+        self.service.mutate.assert_not_called()
+
+        self.search_results = [[self._budget_row(10)], self._enabled(20), []]
+        self.assertEqual(campaigns.enable_campaign("1", 5)["status"], "ENABLED")
 
     def test_pause_is_never_blocked(self):
         self.limits = guardrails.SpendLimits(
@@ -577,6 +630,652 @@ class TestReadTools(MutateToolTestCase):
         self.assertEqual(
             result["targeting"][0]["location_name"], "United States"
         )
+
+
+def _campaign_row(strategy="MANUAL_CPC", channel="SEARCH", **fields):
+    return {
+        "campaign.name": "Search",
+        "campaign.advertising_channel_type": channel,
+        "campaign.bidding_strategy_type": strategy,
+        "campaign.bidding_strategy": "",
+        "customer.currency_code": "USD",
+        **fields,
+    }
+
+
+def _ad_group_bid(name, bid):
+    return {
+        "ad_group.resource_name": f"customers/1/adGroups/{len(name)}",
+        "ad_group.name": name,
+        "ad_group.cpc_bid_micros": int(bid * 1_000_000),
+    }
+
+
+def _criterion_bid(ad_group_id, text, match_type, bid, type_="KEYWORD"):
+    """A keyword (or webpage) row with its own and effective CPC bid."""
+    return {
+        "ad_group.id": ad_group_id,
+        "ad_group_criterion.criterion_id": 31,
+        "ad_group_criterion.type": type_,
+        "ad_group_criterion.keyword.text": text,
+        "ad_group_criterion.keyword.match_type": match_type,
+        "ad_group_criterion.cpc_bid_micros": int(bid * 1_000_000),
+        "ad_group_criterion.effective_cpc_bid_micros": int(bid * 1_000_000),
+    }
+
+
+class TestSetBiddingStrategy(MutateToolTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.limits = guardrails.SpendLimits()
+        limits_patch = patch(
+            "ads_mcp.guardrails.get_limits", side_effect=lambda _: self.limits
+        )
+        limits_patch.start()
+        self.addCleanup(limits_patch.stop)
+
+    def _campaign_op(self):
+        operations = self.mutate_calls()[-1]
+        [update] = [
+            op.campaign_operation
+            for op in operations
+            if op._pb.WhichOneof("operation") == "campaign_operation"
+        ]
+        return update, operations
+
+    def test_switches_to_maximize_conversions_with_target(self):
+        self.search_results = [[_campaign_row("MANUAL_CPC")]]
+        result = campaigns.set_bidding_strategy(
+            "1", 5, "MAXIMIZE_CONVERSIONS", target_cpa=4.5
+        )
+        update, operations = self._campaign_op()
+        self.assertEqual(update.update.resource_name, "customers/1/campaigns/5")
+        self.assertEqual(
+            update.update._pb.WhichOneof("campaign_bidding_strategy"),
+            "maximize_conversions",
+        )
+        self.assertEqual(
+            update.update.maximize_conversions.target_cpa_micros, 4_500_000
+        )
+        self.assertEqual(
+            list(update.update_mask.paths),
+            ["maximize_conversions.target_cpa_micros"],
+        )
+        # Status, budget and ad groups are untouched.
+        self.assertEqual(len(operations), 1)
+        self.assertEqual(len(self.queries), 1)
+        self.assertEqual(
+            result["previous"], {"bidding_strategy_type": "MANUAL_CPC"}
+        )
+        self.assertEqual(result["target_cpa"], 4.5)
+
+    def test_masks_a_subfield_even_when_the_strategy_is_empty(self):
+        # A mask naming the strategy message fails with FIELD_HAS_SUBFIELDS;
+        # the subfield path selects the strategy and clears the subfield.
+        for strategy, field, path in [
+            ("MANUAL_CPC", "manual_cpc", "manual_cpc.enhanced_cpc_enabled"),
+            (
+                "MAXIMIZE_CLICKS",
+                "target_spend",
+                "target_spend.cpc_bid_ceiling_micros",
+            ),
+            (
+                "MAXIMIZE_CONVERSIONS",
+                "maximize_conversions",
+                "maximize_conversions.target_cpa_micros",
+            ),
+            (
+                "MAXIMIZE_CONVERSION_VALUE",
+                "maximize_conversion_value",
+                "maximize_conversion_value.target_roas",
+            ),
+        ]:
+            self.search_results = [[_campaign_row("TARGET_SPEND")], []]
+            campaigns.set_bidding_strategy("1", 5, strategy)
+            update, _ = self._campaign_op()
+            self.assertEqual(
+                update.update._pb.WhichOneof("campaign_bidding_strategy"),
+                field,
+            )
+            self.assertEqual(list(update.update_mask.paths), [path], strategy)
+
+    def test_leaving_a_portfolio_strategy_reports_it(self):
+        self.search_results = [
+            [
+                _campaign_row(
+                    "TARGET_SPEND",
+                    **{
+                        "campaign.bidding_strategy": (
+                            "customers/1/biddingStrategies/9"
+                        ),
+                        "campaign.target_spend.cpc_bid_ceiling_micros": 1_500_000,
+                    },
+                )
+            ]
+        ]
+        result = campaigns.set_bidding_strategy(
+            "1", 5, "MAXIMIZE_CONVERSION_VALUE", target_roas=3.5
+        )
+        update, _ = self._campaign_op()
+        self.assertEqual(
+            update.update.maximize_conversion_value.target_roas, 3.5
+        )
+        self.assertEqual(
+            result["previous"],
+            {
+                "bidding_strategy_type": "TARGET_SPEND",
+                "portfolio_bidding_strategy": "customers/1/biddingStrategies/9",
+                "cpc_bid_ceiling": 1.5,
+            },
+        )
+
+    def test_manual_cpc_sets_default_cpc_on_every_ad_group(self):
+        self.search_results = [
+            [_campaign_row("MAXIMIZE_CONVERSIONS")],
+            [_ad_group_bid("Brand", 0.01), _ad_group_bid("Generic", 0.01)],
+        ]
+        result = campaigns.set_bidding_strategy(
+            "1", 5, "MANUAL_CPC", default_cpc=0.8
+        )
+        [operations] = self.mutate_calls()
+        self.assertEqual(
+            operations[0]._pb.WhichOneof("operation"), "campaign_operation"
+        )
+        ad_groups = [op.ad_group_operation for op in operations[1:]]
+        self.assertEqual(
+            [
+                (g.update.resource_name, g.update.cpc_bid_micros)
+                for g in ad_groups
+            ],
+            [
+                ("customers/1/adGroups/5", 800_000),
+                ("customers/1/adGroups/7", 800_000),
+            ],
+        )
+        for group in ad_groups:
+            self.assertEqual(list(group.update_mask.paths), ["cpc_bid_micros"])
+        self.assertIn("ad_group.status != 'REMOVED'", self.queries[1])
+        self.assertEqual(
+            result["ad_group_default_bids"], {"Brand": 0.8, "Generic": 0.8}
+        )
+        self.assertNotIn("next_steps", result)
+
+    def test_manual_cpc_without_default_cpc_keeps_and_reports_bids(self):
+        self.search_results = [
+            [_campaign_row("MAXIMIZE_CONVERSIONS")],
+            [_ad_group_bid("Brand", 0.5)],
+        ]
+        result = campaigns.set_bidding_strategy("1", 5, "MANUAL_CPC")
+        [operations] = self.mutate_calls()
+        self.assertEqual(len(operations), 1)
+        self.assertEqual(result["ad_group_default_bids"], {"Brand": 0.5})
+        self.assertIn("set_cpc_bids", result["next_steps"])
+
+    def test_guardrail_refusals(self):
+        self.limits = guardrails.SpendLimits(max_cpc_bid=2.0)
+        for kwargs, message in [
+            (
+                {"bidding_strategy": "MAXIMIZE_CLICKS", "cpc_bid_ceiling": 3},
+                "max_cpc_bid of 2.0",
+            ),
+            (
+                {"bidding_strategy": "MAXIMIZE_CLICKS"},
+                "needs a CPC bid ceiling",
+            ),
+            (
+                {"bidding_strategy": "MANUAL_CPC", "default_cpc": 2.5},
+                "max_cpc_bid of 2.0",
+            ),
+        ]:
+            with self.assertRaisesRegex(ToolError, message):
+                campaigns.set_bidding_strategy("1", 5, **kwargs)
+        # Stored bids above the limit would apply again under MANUAL_CPC.
+        self.search_results = [
+            [_campaign_row("MAXIMIZE_CONVERSIONS")],
+            [_ad_group_bid("Brand", 5.0), _ad_group_bid("Generic", 1.0)],
+            [],
+        ]
+        with self.assertRaisesRegex(ToolError, r"\(ad group Brand: 5.0\)"):
+            campaigns.set_bidding_strategy("1", 5, "MANUAL_CPC")
+        # default_cpc replaces ad group bids, but keyword and dynamic search
+        # ad webpage bids override it.
+        self.search_results = [
+            [_campaign_row("MAXIMIZE_CONVERSIONS")],
+            [_ad_group_bid("Brand", 5.0)],
+            [
+                _criterion_bid(7, "running shoes", "EXACT", 10.0),
+                _criterion_bid(7, "", "", 4.0, "WEBPAGE"),
+            ],
+        ]
+        with self.assertRaisesRegex(
+            ToolError,
+            r"\(\[running shoes\] in ad group 7: 10.0; "
+            r"webpage 31 in ad group 7: 4.0\)",
+        ):
+            campaigns.set_bidding_strategy(
+                "1", 5, "MANUAL_CPC", default_cpc=1.0
+            )
+        self.assertIn("ad_group_criterion.cpc_bid_micros", self.queries[-1])
+        self.assertIn("ad_group_criterion.negative = FALSE", self.queries[-1])
+        self.assertIn("campaign.id = 5", self.queries[-1])
+        self.service.mutate.assert_not_called()
+
+        self.search_results = [
+            [_campaign_row("MAXIMIZE_CONVERSIONS")],
+            [_ad_group_bid("Brand", 5.0)],
+            [_criterion_bid(7, "running shoes", "EXACT", 1.5)],
+        ]
+        result = campaigns.set_bidding_strategy(
+            "1", 5, "MANUAL_CPC", default_cpc=1.0
+        )
+        self.assertEqual(len(self.mutate_calls()), 1)
+        # The result describes the campaign, not the last row read.
+        self.assertEqual(result["name"], "Search")
+        self.assertEqual(result["currency_code"], "USD")
+
+        self.search_results = [[_campaign_row()]]
+        campaigns.set_bidding_strategy(
+            "1", 5, "MAXIMIZE_CLICKS", cpc_bid_ceiling=2.0
+        )
+        update, _ = self._campaign_op()
+        self.assertEqual(
+            update.update.target_spend.cpc_bid_ceiling_micros, 2_000_000
+        )
+
+    def test_rejects_options_of_other_strategies(self):
+        for kwargs in [
+            {"bidding_strategy": "MAXIMIZE_CONVERSIONS", "target_roas": 2.0},
+            {"bidding_strategy": "MANUAL_CPC", "cpc_bid_ceiling": 1.0},
+            {"bidding_strategy": "MAXIMIZE_CLICKS", "default_cpc": 1.0},
+            {"bidding_strategy": "MAXIMIZE_CONVERSIONS", "target_cpa": -1},
+            {"bidding_strategy": "TARGET_IMPRESSION_SHARE"},
+        ]:
+            with self.assertRaises(ToolError, msg=kwargs):
+                campaigns.set_bidding_strategy("1", 5, **kwargs)
+        self.service.mutate.assert_not_called()
+
+    def test_refuses_app_campaigns_and_missing_campaigns(self):
+        self.search_results = [[_campaign_row(channel="MULTI_CHANNEL")]]
+        with self.assertRaisesRegex(ToolError, "App campaigns"):
+            campaigns.set_bidding_strategy("1", 5, "MAXIMIZE_CONVERSIONS")
+        with self.assertRaisesRegex(ToolError, "not found"):
+            campaigns.set_bidding_strategy("1", 5, "MAXIMIZE_CONVERSIONS")
+        self.service.mutate.assert_not_called()
+
+    def test_validate_only(self):
+        self.search_results = [[_campaign_row()]]
+        result = campaigns.set_bidding_strategy(
+            "1", 5, "MAXIMIZE_CONVERSIONS", validate_only=True
+        )
+        self.assertTrue(
+            self.service.mutate.call_args.kwargs["request"].validate_only
+        )
+        self.assertTrue(result["validate_only"])
+
+
+def _search_ad_group(channel="SEARCH"):
+    return {
+        "ad_group.id": 7,
+        "ad_group.name": "Shoes",
+        "ad_group.status": "ENABLED",
+        "campaign.id": 5,
+        "campaign.advertising_channel_type": channel,
+        "campaign.bidding_strategy_type": "MANUAL_CPC",
+    }
+
+
+_RSA_HEADLINES = [
+    "Running Shoes Sale",
+    campaigns.RsaHeadline(text="Free Returns", pin="HEADLINE_1"),
+    {"text": "Shop Trail Shoes"},
+    "Running Shoes Sale",
+]
+_RSA_DESCRIPTIONS = [
+    campaigns.RsaDescription(text="Lightweight shoes.", pin="DESCRIPTION_2"),
+    "Order today, delivered this week.",
+]
+
+
+class TestCreateResponsiveSearchAd(MutateToolTestCase):
+
+    def _create(self, **kwargs):
+        args = dict(
+            customer_id="1",
+            final_url="https://example.com/shoes",
+            headlines=_RSA_HEADLINES,
+            descriptions=_RSA_DESCRIPTIONS,
+            ad_group_id=7,
+        )
+        args.update(kwargs)
+        return campaigns.create_responsive_search_ad(**args)
+
+    def test_creates_ad_with_pins_and_paths(self):
+        self.search_results = [[_search_ad_group()]]
+        result = self._create(path1="shoes", path2="sale", status="PAUSED")
+
+        [[op]] = self.mutate_calls()
+        ad_group_ad = op.ad_group_ad_operation.create
+        self.assertEqual(ad_group_ad.ad_group, "customers/1/adGroups/7")
+        self.assertEqual(ad_group_ad.status.name, "PAUSED")
+        self.assertEqual(
+            list(ad_group_ad.ad.final_urls), ["https://example.com/shoes"]
+        )
+        rsa = ad_group_ad.ad.responsive_search_ad
+        # Duplicates are dropped; pins stay with their text.
+        self.assertEqual(
+            [(h.text, h.pinned_field.name) for h in rsa.headlines],
+            [
+                ("Running Shoes Sale", "UNSPECIFIED"),
+                ("Free Returns", "HEADLINE_1"),
+                ("Shop Trail Shoes", "UNSPECIFIED"),
+            ],
+        )
+        self.assertEqual(
+            [(d.text, d.pinned_field.name) for d in rsa.descriptions],
+            [
+                ("Lightweight shoes.", "DESCRIPTION_2"),
+                ("Order today, delivered this week.", "UNSPECIFIED"),
+            ],
+        )
+        self.assertEqual((rsa.path1, rsa.path2), ("shoes", "sale"))
+        self.assertEqual(result["ad_id"], "1000")
+        self.assertEqual(result["ad_group_id"], "7")
+        self.assertIn("ad_group.id = 7", self.queries[0])
+
+    def test_uses_the_only_ad_group_of_a_campaign(self):
+        self.search_results = [[_search_ad_group()]]
+        self._create(ad_group_id=None, campaign_id=5)
+        [[op]] = self.mutate_calls()
+        self.assertEqual(
+            op.ad_group_ad_operation.create.ad_group, "customers/1/adGroups/7"
+        )
+        self.assertIn("campaign.id = 5", self.queries[0])
+
+    def test_validates_texts_paths_and_pins_before_any_request(self):
+        for kwargs, message in [
+            ({"headlines": ["One", "Two"]}, "between 3 and 15"),
+            ({"headlines": ["x" * 31, "Two", "Three"]}, "at most 30"),
+            ({"descriptions": ["Only one."]}, "between 2 and 4"),
+            ({"descriptions": ["x" * 91, "Two."]}, "at most 90"),
+            ({"path1": "x" * 16}, "path1 must be at most 15"),
+            ({"path2": "sale"}, "path2 needs path1"),
+            (
+                {"headlines": ["One", "Two", {"text": "Three", "pin": "X"}]},
+                "pin must be one of",
+            ),
+            (
+                {
+                    "headlines": [
+                        "One",
+                        "Two",
+                        "Three",
+                        {"text": "One", "pin": "HEADLINE_2"},
+                    ]
+                },
+                "two pins",
+            ),
+        ]:
+            with self.assertRaisesRegex(ToolError, message):
+                self._create(**kwargs)
+        self.assertEqual(self.queries, [])
+        self.service.mutate.assert_not_called()
+
+    def test_enabled_ad_is_refused_while_bids_above_the_limit_would_serve(
+        self,
+    ):
+        with patch(
+            "ads_mcp.guardrails.get_limits",
+            return_value=guardrails.SpendLimits(max_cpc_bid=2.0),
+        ):
+            self.search_results = [
+                [_search_ad_group()],
+                [_criterion_bid(7, "running shoes", "BROAD", 4.0)],
+            ]
+            with self.assertRaisesRegex(ToolError, "Create the ad PAUSED"):
+                self._create()
+            self.assertIn("ad_group.id = 7", self.queries[-1])
+            self.service.mutate.assert_not_called()
+            # A paused ad lets nothing serve.
+            self.search_results = [[_search_ad_group()]]
+            self._create(status="PAUSED")
+        self.assertEqual(len(self.queries), 3)
+        self.assertEqual(len(self.mutate_calls()), 1)
+
+    def test_refuses_non_search_campaigns(self):
+        self.search_results = [[_search_ad_group("PERFORMANCE_MAX")]]
+        with self.assertRaisesRegex(ToolError, "Search campaigns"):
+            self._create()
+        self.service.mutate.assert_not_called()
+
+    def test_validate_only(self):
+        self.search_results = [[_search_ad_group()]]
+        result = self._create(validate_only=True)
+        self.assertTrue(
+            self.service.mutate.call_args.kwargs["request"].validate_only
+        )
+        self.assertTrue(result["validate_only"])
+        self.assertNotIn("ad_id", result)
+
+    def test_policy_errors_name_the_policy_topics(self):
+        exception = policy_exception(self.client)
+        element = type(exception.failure.errors[0].location).FieldPathElement(
+            field_name="mutate_operations", index=0
+        )
+        exception.failure.errors[0].location.field_path_elements.append(element)
+        self.service.mutate.side_effect = exception
+        self.search_results = [[_search_ad_group()]]
+        with self.assertRaises(ToolError) as ctx:
+            self._create()
+        message = str(ctx.exception)
+        self.assertIn("policy_finding_error.POLICY_FINDING", message)
+        self.assertIn(
+            "[operation: responsive search ad in ad group 7] "
+            "Policy: DESTINATION_MISMATCH (PROHIBITED): 'example.org'",
+            message,
+        )
+
+
+def _ad(ad_group_id, ad_id, status="ENABLED"):
+    return {
+        "ad_group_ad.resource_name": (
+            f"customers/1/adGroupAds/{ad_group_id}~{ad_id}"
+        ),
+        "ad_group_ad.status": status,
+        "ad_group_ad.ad.id": ad_id,
+        "ad_group_ad.ad.type": "RESPONSIVE_SEARCH_AD",
+        "ad_group.id": ad_group_id,
+        "campaign.id": 5,
+    }
+
+
+class TestSetAdStatus(MutateToolTestCase):
+
+    def test_pauses_by_ad_id_and_resource_name(self):
+        self.search_results = [[_ad(7, 11), _ad(8, 12), _ad(7, 13, "PAUSED")]]
+        result = campaigns.set_ad_status(
+            "1",
+            "PAUSED",
+            ad_ids=[11, "13"],
+            ad_group_id=7,
+            resource_names=["customers/1/adGroupAds/8~12", "7~11"],
+        )
+        self.assertIn(
+            "ad_group_ad.resource_name IN ('customers/1/adGroupAds/7~11', "
+            "'customers/1/adGroupAds/7~13', 'customers/1/adGroupAds/8~12')",
+            self.queries[0],
+        )
+        [operations] = self.mutate_calls()
+        self.assertEqual(
+            [
+                (
+                    op.ad_group_ad_operation._pb.WhichOneof("operation"),
+                    op.ad_group_ad_operation.update.resource_name,
+                    op.ad_group_ad_operation.update.status.name,
+                    list(op.ad_group_ad_operation.update_mask.paths),
+                )
+                for op in operations
+            ],
+            [
+                ("update", "customers/1/adGroupAds/7~11", "PAUSED", ["status"]),
+                ("update", "customers/1/adGroupAds/8~12", "PAUSED", ["status"]),
+            ],
+        )
+        self.assertEqual([a["ad_id"] for a in result["changed"]], ["11", "12"])
+        self.assertEqual(result["unchanged"][0]["ad_id"], "13")
+
+    def test_enabling_checks_bids_and_pausing_never_does(self):
+        limits = patch(
+            "ads_mcp.guardrails.get_limits",
+            return_value=guardrails.SpendLimits(max_cpc_bid=2.0),
+        )
+        with limits as get_limits:
+            self.search_results = [
+                [_ad(7, 11, "PAUSED"), _ad(8, 12, "PAUSED"), _ad(8, 13)],
+                [_criterion_bid(8, "boots", "EXACT", 9.0)],
+            ]
+            with self.assertRaisesRegex(
+                ToolError, r"enabling these ads .*\[boots\] in ad group 8"
+            ):
+                campaigns.set_ad_status(
+                    "1", "ENABLED", resource_names=["7~11", "8~12", "8~13"]
+                )
+            self.assertIn("ad_group.id IN (7, 8)", self.queries[-1])
+            self.assertIn("campaign.status = 'ENABLED'", self.queries[-1])
+            self.service.mutate.assert_not_called()
+
+            get_limits.reset_mock()
+            self.search_results = [[_ad(7, 11)]]
+            campaigns.set_ad_status("1", "PAUSED", ad_ids=[11], ad_group_id=7)
+            get_limits.assert_not_called()
+        self.assertEqual(len(self.mutate_calls()), 1)
+
+    def test_missing_or_removed_ads_change_nothing(self):
+        self.search_results = [[_ad(7, 11)]]
+        with self.assertRaisesRegex(ToolError, "7~12"):
+            campaigns.set_ad_status(
+                "1", "PAUSED", ad_ids=[11, 12], ad_group_id=7
+            )
+        self.search_results = [[_ad(7, 11, "REMOVED")]]
+        with self.assertRaisesRegex(ToolError, "Removed ads"):
+            campaigns.set_ad_status("1", "ENABLED", ad_ids=[11], ad_group_id=7)
+        self.service.mutate.assert_not_called()
+
+    def test_rejects_invalid_identifiers(self):
+        for kwargs in [
+            {"ad_ids": [11]},
+            {"resource_names": ["customers/2/adGroupAds/7~11"]},
+            {"resource_names": ["7~11~3"]},
+            {"resource_names": ["7~x' OR '1"]},
+            {},
+        ]:
+            with self.assertRaises(ToolError, msg=kwargs):
+                campaigns.set_ad_status("1", "PAUSED", **kwargs)
+        with self.assertRaises(ToolError):
+            campaigns.set_ad_status("1", "REMOVED", ad_ids=[11], ad_group_id=7)
+        self.assertEqual(self.queries, [])
+
+    def test_validate_only(self):
+        self.search_results = [[_ad(7, 11)]]
+        result = campaigns.set_ad_status(
+            "1", "PAUSED", ad_ids=[11], ad_group_id=7, validate_only=True
+        )
+        self.assertTrue(
+            self.service.mutate.call_args.kwargs["request"].validate_only
+        )
+        self.assertTrue(result["validate_only"])
+
+
+class TestUpdateAdGroup(MutateToolTestCase):
+
+    def test_renames_and_pauses(self):
+        self.search_results = [
+            [
+                {
+                    "ad_group.name": "Old",
+                    "ad_group.status": "ENABLED",
+                    "campaign.id": 5,
+                }
+            ]
+        ]
+        result = campaigns.update_ad_group(
+            "1", 7, name=" Trail shoes ", status="PAUSED"
+        )
+        [[op]] = self.mutate_calls()
+        update = op.ad_group_operation
+        self.assertEqual(update.update.resource_name, "customers/1/adGroups/7")
+        self.assertEqual(update.update.name, "Trail shoes")
+        self.assertEqual(update.update.status.name, "PAUSED")
+        self.assertEqual(list(update.update_mask.paths), ["name", "status"])
+        self.assertEqual(result["previous_name"], "Old")
+        self.assertEqual(result["previous_status"], "ENABLED")
+
+    def test_status_only_masks_status(self):
+        self.search_results = [[{"ad_group.status": "PAUSED"}]]
+        result = campaigns.update_ad_group(
+            "1", 7, status="ENABLED", validate_only=True
+        )
+        [[op]] = self.mutate_calls()
+        self.assertEqual(
+            list(op.ad_group_operation.update_mask.paths), ["status"]
+        )
+        self.assertTrue(
+            self.service.mutate.call_args.kwargs["request"].validate_only
+        )
+        self.assertTrue(result["validate_only"])
+
+    def test_enabling_checks_the_bids_it_lets_serve(self):
+        def ad_group(status):
+            return [{"ad_group.status": status, "campaign.id": 5}]
+
+        with patch(
+            "ads_mcp.guardrails.get_limits",
+            return_value=guardrails.SpendLimits(max_cpc_bid=2.0),
+        ):
+            self.search_results = [
+                ad_group("PAUSED"),
+                [_criterion_bid(7, "running shoes", "PHRASE", 3.0)],
+            ]
+            with self.assertRaisesRegex(
+                ToolError, '"running shoes" in ad group 7: 3.0'
+            ):
+                campaigns.update_ad_group("1", 7, status="ENABLED")
+            for condition in [
+                "campaign.bidding_strategy_type IN ('MANUAL_CPC', 'ENHANCED_CPC')",
+                "ad_group_criterion.status = 'ENABLED'",
+                "ad_group.id = 7",
+                "campaign.status = 'ENABLED'",
+            ]:
+                self.assertIn(condition, self.queries[-1])
+            self.service.mutate.assert_not_called()
+
+            # No Manual CPC bids above the limit would serve.
+            self.search_results = [ad_group("PAUSED"), []]
+            campaigns.update_ad_group("1", 7, status="ENABLED")
+            # Already enabled, or pausing: nothing starts serving.
+            for status, previous in [
+                ("ENABLED", "ENABLED"),
+                ("PAUSED", "ENABLED"),
+            ]:
+                self.search_results = [ad_group(previous)]
+                campaigns.update_ad_group("1", 7, status=status)
+        # Two reads per enabling, one per no-op or pause.
+        self.assertEqual(len(self.queries), 6)
+        self.assertEqual(len(self.mutate_calls()), 3)
+
+    def test_rejects_empty_missing_and_removed(self):
+        with self.assertRaises(ToolError):
+            campaigns.update_ad_group("1", 7)
+        with self.assertRaises(ToolError):
+            campaigns.update_ad_group("1", 7, name=" ")
+        with self.assertRaises(ToolError):
+            campaigns.update_ad_group("1", 7, status="REMOVED")
+        with self.assertRaisesRegex(ToolError, "not found"):
+            campaigns.update_ad_group("1", 7, status="PAUSED")
+        self.search_results = [[{"ad_group.status": "REMOVED"}]]
+        with self.assertRaisesRegex(ToolError, "removed"):
+            campaigns.update_ad_group("1", 7, status="ENABLED")
+        self.service.mutate.assert_not_called()
 
 
 if __name__ == "__main__":

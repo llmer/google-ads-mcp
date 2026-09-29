@@ -15,15 +15,18 @@
 """Tools for reading, creating and managing campaigns.
 
 New campaigns are always created PAUSED so that nothing spends money until
-the campaign is reviewed and explicitly enabled with `enable_campaign`.
+the campaign is reviewed and explicitly enabled with `enable_campaign`. No
+other tool enables a campaign.
 """
 
+import re
 import uuid
 from typing import Any, Dict, List, Literal, Tuple
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import BaseModel, Field
 
 import ads_mcp.guardrails as guardrails
 import ads_mcp.mutations as mutations
@@ -171,6 +174,26 @@ def _targeting_operations(
         )
         operations.append((op, f"language {language_id}"))
     return operations
+
+
+def _check_click_bid(
+    limits: guardrails.SpendLimits, strategy: str, bid: float | None
+) -> None:
+    """Applies the max_cpc_bid guardrail to a manual CPC bid or a Maximize
+    Clicks bid ceiling.
+
+    Maximize Clicks without a ceiling could bid any amount per click, so it
+    needs one when max_cpc_bid is configured.
+    """
+    if bid is not None:
+        if bid <= 0:
+            raise ToolError("CPC bids must be greater than 0.")
+        guardrails.check_cpc_bid(limits, bid)
+    elif strategy == "MAXIMIZE_CLICKS" and limits.max_cpc_bid is not None:
+        raise ToolError(
+            f"Guardrail: max_cpc_bid is {limits.max_cpc_bid}, so MAXIMIZE_CLICKS "
+            "needs a CPC bid ceiling at or below it."
+        )
 
 
 def _set_bidding(
@@ -631,7 +654,8 @@ def create_search_campaign(
         target_roas: Optional target return on ad spend as a ratio (3.5 = 350%),
           for MAXIMIZE_CONVERSION_VALUE.
         max_cpc: Max cost per click. Required for MANUAL_CPC (the ad group's
-          default bid); optional bid ceiling for MAXIMIZE_CLICKS.
+          default bid); bid ceiling for MAXIMIZE_CLICKS, required there when
+          the max_cpc_bid guardrail is set. Capped by max_cpc_bid.
         ad_group_name: The ad group name. Defaults to "<name> ad group".
         path1: Optional display URL path, max 15 characters.
         path2: Optional second display URL path, max 15 characters.
@@ -652,6 +676,10 @@ def create_search_campaign(
         raise ToolError("At least one keyword is required.")
     if bidding_strategy == "MANUAL_CPC" and not max_cpc:
         raise ToolError("max_cpc is required for MANUAL_CPC bidding.")
+    if bidding_strategy in ("MANUAL_CPC", "MAXIMIZE_CLICKS"):
+        _check_click_bid(
+            guardrails.get_limits(customer_id), bidding_strategy, max_cpc
+        )
 
     client = utils.get_googleads_client(login_customer_id=login_customer_id)
     ids = mutations.TempIds()
@@ -1224,6 +1252,14 @@ def _set_campaign_status(
             row.get("campaign.campaign_budget"),
             daily_budget,
         )
+        guardrails.check_serving_cpc_bids(
+            client,
+            customer_id,
+            limits,
+            [f"campaign.id = {campaign_id}", "ad_group.status = 'ENABLED'"],
+            "enabling this campaign",
+            "Lower those bids first, e.g. with set_cpc_bids.",
+        )
 
     op = client.get_type("MutateOperation")
     campaign = op.campaign_operation.update
@@ -1279,7 +1315,8 @@ def enable_campaign(
 
     Before enabling, review the campaign with get_campaign and the account's
     current spend with get_spend_overview, and confirm with the user. Refused
-    if it would break the spend guardrails configured on the server.
+    if it would break the spend guardrails configured on the server,
+    including Manual CPC keyword bids above max_cpc_bid.
 
     Args:
         customer_id: The Google Ads customer ID.
@@ -1310,12 +1347,20 @@ def update_campaign_settings(
     device_bid_adjustments: Dict[str, float] | None = None,
     text_asset_automation: _OPT | None = None,
     final_url_expansion: _OPT | None = None,
+    name: str | None = None,
+    target_google_search: bool | None = None,
+    target_search_network: bool | None = None,
+    target_content_network: bool | None = None,
+    end_date: str | None = None,
+    clear_end_date: bool = False,
     validate_only: bool = False,
     login_customer_id: str | int | None = None,
 ) -> Dict[str, Any]:
-    """Updates campaign settings that are not about budget or targeting lists.
+    """Updates campaign settings that are not about budget, bidding or targeting lists.
 
-    Only the given settings are changed. None of them can raise a budget.
+    Only the given settings are changed. None of them can raise a budget or
+    enable the campaign. Adding networks spreads the same budget over more
+    placements.
 
     Args:
         customer_id: The Google Ads customer ID.
@@ -1331,6 +1376,18 @@ def update_campaign_settings(
           headlines and descriptions from the landing page (Search, PMax).
         final_url_expansion: OPTED_OUT stops Google from sending clicks to
           other pages of the site than the ad's final URL.
+        name: A new campaign name, unique in the account.
+        target_google_search: Whether ads show on Google Search.
+        target_search_network: Whether ads also show on Google search partner
+          sites (needs target_google_search).
+        target_content_network: Whether a Search campaign's ads also show on
+          the Display Network (Display expansion).
+        end_date: The campaign's last day, YYYY-MM-DD, in the account time
+          zone. Refused for an enabled campaign that has already ended, since
+          it would restart spending: pause it, change the date, then use
+          enable_campaign.
+        clear_end_date: Remove the end date, so the campaign runs
+          indefinitely. Refused like end_date for an ended enabled campaign.
         validate_only: If true, validates the request without changing anything.
         login_customer_id: Optional manager customer ID to use as the login-customer-id header.
 
@@ -1339,25 +1396,88 @@ def update_campaign_settings(
     """
     customer_id = utils.clean_customer_id(customer_id)
     campaign_id = mutations.parse_id(campaign_id, "campaign_id")
-    if not any(
-        v is not None
-        for v in (
-            location_targeting,
-            device_bid_adjustments,
-            text_asset_automation,
-            final_url_expansion,
+    networks = {
+        "target_google_search": target_google_search,
+        "target_search_network": target_search_network,
+        "target_content_network": target_content_network,
+    }
+    if (
+        not any(
+            v is not None
+            for v in (
+                location_targeting,
+                device_bid_adjustments,
+                text_asset_automation,
+                final_url_expansion,
+                name,
+                end_date,
+                *networks.values(),
+            )
         )
+        and not clear_end_date
     ):
         raise ToolError("Nothing to update: give at least one setting.")
+    if name is not None and not name.strip():
+        raise ToolError("name must not be empty.")
+    if end_date is not None and clear_end_date:
+        raise ToolError("Give end_date or clear_end_date, not both.")
+    end_date_time = None
+    if end_date is not None:
+        end_date_time = mutations.format_date_time(end_date, end_of_day=True)
+        if not end_date_time:
+            raise ToolError(
+                "end_date must be YYYY-MM-DD; use clear_end_date to remove it."
+            )
     client = utils.get_googleads_client(login_customer_id=login_customer_id)
     campaign_rn = _campaign_rn(customer_id, campaign_id)
     operations: List[Tuple[Any, str]] = []
     changed: Dict[str, Any] = {}
+    previous_end_date_time = None
+    if end_date_time or clear_end_date:
+        rows = mutations.search(
+            client,
+            customer_id,
+            "SELECT campaign.status, campaign.serving_status, "
+            f"campaign.end_date_time FROM campaign WHERE campaign.id = {campaign_id}",
+        )
+        if not rows:
+            raise ToolError(f"Campaign {campaign_id} not found.")
+        row = rows[0]
+        # An ended campaign does not count towards the spend guardrails;
+        # giving it a later end date would start it again without them.
+        if (
+            row.get("campaign.status") == "ENABLED"
+            and row.get("campaign.serving_status") == "ENDED"
+        ):
+            raise ToolError(
+                f"Campaign {campaign_id} is enabled but has ended, so changing "
+                "its end date would restart its spending. Pause it with "
+                "pause_campaign, change the end date, then enable it with "
+                "enable_campaign, which checks the spend guardrails."
+            )
+        previous_end_date_time = row.get("campaign.end_date_time")
 
     paths: List[str] = []
     op = client.get_type("MutateOperation")
     campaign = op.campaign_operation.update
     campaign.resource_name = campaign_rn
+    if name is not None:
+        campaign.name = name.strip()
+        paths.append("name")
+        changed["name"] = campaign.name
+    for field, value in networks.items():
+        if value is not None:
+            setattr(campaign.network_settings, field, value)
+            paths.append(f"network_settings.{field}")
+            changed[field] = value
+    if end_date_time:
+        campaign.end_date_time = end_date_time
+        paths.append("end_date_time")
+        changed["end_date"] = end_date
+    elif clear_end_date:
+        # Masked but unset, the field is cleared: no end date.
+        paths.append("end_date_time")
+        changed["end_date"] = None
     if location_targeting is not None:
         campaign.geo_target_type_setting.positive_geo_target_type = (
             client.enums.PositiveGeoTargetTypeEnum[location_targeting]
@@ -1434,11 +1554,11 @@ def update_campaign_settings(
         changed["device_bid_adjustments"] = adjustments
 
     mutations.mutate(client, customer_id, operations, validate_only)
-    return {
-        "campaign_id": campaign_id,
-        "changed": changed,
-        "validate_only": validate_only,
-    }
+    result: Dict[str, Any] = {"campaign_id": campaign_id, "changed": changed}
+    if end_date_time or clear_end_date:
+        result["previous_end_date_time"] = previous_end_date_time
+    result["validate_only"] = validate_only
+    return result
 
 
 @campaigns_mcp.tool(annotations=_UPDATE)
@@ -1568,6 +1688,18 @@ def set_cpc_bids(
     group = groups[0]
     if group.get("campaign.bidding_strategy_type") != "MANUAL_CPC":
         raise ToolError("Manual bids only apply to MANUAL_CPC campaigns.")
+    cleared = [k for k, bid in (keyword_bids or {}).items() if not bid]
+    if cleared and default_cpc is None:
+        # Keywords without a bid use the ad group's current default bid.
+        default_bid = mutations.from_micros(
+            group.get("ad_group.cpc_bid_micros")
+        )
+        guardrails.check_effective_cpc_bids(
+            limits,
+            [(keyword, default_bid) for keyword in cleared],
+            "clearing these keyword bids",
+            "Also give a default_cpc within the limit.",
+        )
 
     operations = []
     result: Dict[str, Any] = {
@@ -1618,7 +1750,10 @@ def set_cpc_bids(
             op = client.get_type("MutateOperation")
             criterion = op.ad_group_criterion_operation.update
             criterion.resource_name = row["ad_group_criterion.resource_name"]
-            criterion.cpc_bid_micros = mutations.to_micros(bid) if bid else 0
+            if bid:
+                criterion.cpc_bid_micros = mutations.to_micros(bid)
+            # Otherwise the masked, unset bid is cleared, so the keyword uses
+            # the ad group's default bid. An explicit 0 would not clear it.
             mutations.update_mask(
                 client,
                 op.ad_group_criterion_operation.update_mask,
@@ -1633,5 +1768,677 @@ def set_cpc_bids(
             }
 
     mutations.mutate(client, customer_id, operations, validate_only)
+    result["validate_only"] = validate_only
+    return result
+
+
+# The standard bidding strategies set_bidding_strategy switches to: the
+# campaign field, its message type and the subfield to put in the update
+# mask. Google Ads rejects a mask naming the strategy message itself
+# (FIELD_HAS_SUBFIELDS); a subfield path selects the strategy and resets that
+# subfield when it is not set.
+_STRATEGIES = {
+    "MANUAL_CPC": ("manual_cpc", "ManualCpc", "enhanced_cpc_enabled"),
+    "MAXIMIZE_CLICKS": (
+        "target_spend",
+        "TargetSpend",
+        "cpc_bid_ceiling_micros",
+    ),
+    "MAXIMIZE_CONVERSIONS": (
+        "maximize_conversions",
+        "MaximizeConversions",
+        "target_cpa_micros",
+    ),
+    "MAXIMIZE_CONVERSION_VALUE": (
+        "maximize_conversion_value",
+        "MaximizeConversionValue",
+        "target_roas",
+    ),
+}
+
+
+@campaigns_mcp.tool(annotations=_UPDATE)
+def set_bidding_strategy(
+    customer_id: str | int,
+    campaign_id: str | int,
+    bidding_strategy: Literal[
+        "MANUAL_CPC",
+        "MAXIMIZE_CLICKS",
+        "MAXIMIZE_CONVERSIONS",
+        "MAXIMIZE_CONVERSION_VALUE",
+    ],
+    target_cpa: float | None = None,
+    target_roas: float | None = None,
+    cpc_bid_ceiling: float | None = None,
+    default_cpc: float | None = None,
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Switches a campaign to a standard (non-portfolio) bidding strategy, or changes its target.
+
+    The strategy is replaced as a whole: a target that is not given is
+    cleared, and a campaign using a portfolio strategy leaves it. Budget and
+    status do not change. A new strategy restarts Smart Bidding's learning
+    period, so confirm the change with the user first.
+
+      - MANUAL_CPC: you set the bids. default_cpc sets every ad group's
+        default max CPC in the same request; otherwise ad groups keep their
+        current bids (set_cpc_bids changes them later).
+      - MAXIMIZE_CLICKS: cpc_bid_ceiling caps the bid for each click.
+      - MAXIMIZE_CONVERSIONS: needs conversion tracking; optional target_cpa.
+      - MAXIMIZE_CONVERSION_VALUE: needs conversion values; optional target_roas.
+
+    default_cpc and cpc_bid_ceiling above the max_cpc_bid guardrail are
+    refused. When that guardrail is set, MAXIMIZE_CLICKS needs a ceiling, and
+    MANUAL_CPC is refused while stored bids above it would apply again:
+    keyword bids, or ad group default bids that default_cpc does not replace.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        campaign_id: The campaign ID.
+        bidding_strategy: The strategy to use.
+        target_cpa: Target cost per conversion, for MAXIMIZE_CONVERSIONS.
+        target_roas: Target return on ad spend as a ratio (3.5 = 350%), for
+          MAXIMIZE_CONVERSION_VALUE.
+        cpc_bid_ceiling: Maximum bid per click, for MAXIMIZE_CLICKS.
+        default_cpc: Default max CPC for every ad group, for MANUAL_CPC.
+        validate_only: If true, validates the request without changing anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The previous and new strategy, and for MANUAL_CPC the ad groups'
+        default bids. Monetary values are in the account currency.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    campaign_id = mutations.parse_id(campaign_id, "campaign_id")
+    if bidding_strategy not in _STRATEGIES:
+        raise ToolError(f"Unsupported bidding strategy '{bidding_strategy}'.")
+    options = {
+        "target_cpa": (target_cpa, "MAXIMIZE_CONVERSIONS"),
+        "target_roas": (target_roas, "MAXIMIZE_CONVERSION_VALUE"),
+        "cpc_bid_ceiling": (cpc_bid_ceiling, "MAXIMIZE_CLICKS"),
+        "default_cpc": (default_cpc, "MANUAL_CPC"),
+    }
+    for option, (value, strategy) in options.items():
+        if value is None:
+            continue
+        if strategy != bidding_strategy:
+            raise ToolError(f"{option} only applies to {strategy}.")
+        if value <= 0 or (
+            option != "target_roas" and not mutations.to_micros(value)
+        ):
+            raise ToolError(f"{option} must be at least 0.01.")
+    limits = guardrails.get_limits(customer_id)
+    _check_click_bid(
+        limits,
+        bidding_strategy,
+        default_cpc if default_cpc is not None else cpc_bid_ceiling,
+    )
+
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    rows = mutations.search(
+        client,
+        customer_id,
+        "SELECT campaign.name, campaign.advertising_channel_type, "
+        "campaign.bidding_strategy_type, campaign.bidding_strategy, "
+        "campaign.maximize_conversions.target_cpa_micros, "
+        "campaign.maximize_conversion_value.target_roas, "
+        "campaign.target_spend.cpc_bid_ceiling_micros, customer.currency_code "
+        f"FROM campaign WHERE campaign.id = {campaign_id}",
+    )
+    if not rows:
+        raise ToolError(f"Campaign {campaign_id} not found.")
+    row = rows[0]
+    if row.get("campaign.advertising_channel_type") == "MULTI_CHANNEL":
+        raise ToolError(
+            "App campaigns bid towards their app campaign goal; this tool "
+            "does not change them."
+        )
+
+    def micros(field):
+        value = row.get(field)
+        return mutations.from_micros(value) if value else None
+
+    previous = {
+        "bidding_strategy_type": row.get("campaign.bidding_strategy_type"),
+        "portfolio_bidding_strategy": row.get("campaign.bidding_strategy"),
+        "target_cpa": micros("campaign.maximize_conversions.target_cpa_micros"),
+        "target_roas": row.get(
+            "campaign.maximize_conversion_value.target_roas"
+        ),
+        "cpc_bid_ceiling": micros(
+            "campaign.target_spend.cpc_bid_ceiling_micros"
+        ),
+    }
+
+    ad_groups: List[Dict[str, Any]] = []
+    if bidding_strategy == "MANUAL_CPC":
+        ad_groups = mutations.search(
+            client,
+            customer_id,
+            "SELECT ad_group.resource_name, ad_group.name, "
+            "ad_group.cpc_bid_micros FROM ad_group "
+            f"WHERE campaign.id = {campaign_id} "
+            "AND ad_group.status != 'REMOVED'",
+        )
+        if limits.max_cpc_bid is not None:
+            # Stored bids apply again under Manual CPC: ad group defaults
+            # (unless default_cpc replaces them), and the bids of keywords
+            # and other criteria, which override the default.
+            bids = []
+            if default_cpc is None:
+                bids = [
+                    (
+                        f"ad group {group['ad_group.name']}",
+                        mutations.from_micros(
+                            group.get("ad_group.cpc_bid_micros")
+                        ),
+                    )
+                    for group in ad_groups
+                ]
+            criteria = mutations.search(
+                client,
+                customer_id,
+                "SELECT ad_group_criterion.criterion_id, "
+                "ad_group_criterion.type, ad_group_criterion.keyword.text, "
+                "ad_group_criterion.keyword.match_type, "
+                "ad_group_criterion.cpc_bid_micros, ad_group.id "
+                f"FROM ad_group_criterion WHERE campaign.id = {campaign_id} "
+                "AND ad_group_criterion.negative = FALSE "
+                "AND ad_group_criterion.status != 'REMOVED' "
+                "AND ad_group.status != 'REMOVED'",
+            )
+            bids += [
+                (
+                    mutations.criterion_label(criterion),
+                    mutations.from_micros(
+                        criterion.get("ad_group_criterion.cpc_bid_micros")
+                    ),
+                )
+                for criterion in criteria
+            ]
+            guardrails.check_effective_cpc_bids(
+                limits,
+                bids,
+                "switching to MANUAL_CPC",
+                "default_cpc replaces ad group default bids, but not keyword "
+                "or other criterion bids.",
+            )
+
+    field, type_name, subfield = _STRATEGIES[bidding_strategy]
+    op = client.get_type("MutateOperation")
+    campaign = op.campaign_operation.update
+    campaign.resource_name = _campaign_rn(customer_id, campaign_id)
+    # Sets the oneof member even when no subfield is set, e.g. ManualCpc.
+    client.copy_from(getattr(campaign, field), client.get_type(type_name))
+    if target_cpa is not None:
+        campaign.maximize_conversions.target_cpa_micros = mutations.to_micros(
+            target_cpa
+        )
+    if target_roas is not None:
+        campaign.maximize_conversion_value.target_roas = target_roas
+    if cpc_bid_ceiling is not None:
+        campaign.target_spend.cpc_bid_ceiling_micros = mutations.to_micros(
+            cpc_bid_ceiling
+        )
+    mutations.update_mask(
+        client, op.campaign_operation.update_mask, [f"{field}.{subfield}"]
+    )
+    operations = [(op, f"campaign {campaign_id} bidding strategy")]
+
+    if default_cpc is not None:
+        for group in ad_groups:
+            op = client.get_type("MutateOperation")
+            ad_group = op.ad_group_operation.update
+            ad_group.resource_name = group["ad_group.resource_name"]
+            ad_group.cpc_bid_micros = mutations.to_micros(default_cpc)
+            mutations.update_mask(
+                client, op.ad_group_operation.update_mask, ["cpc_bid_micros"]
+            )
+            operations.append(
+                (op, f"ad group '{group['ad_group.name']}' default CPC")
+            )
+
+    mutations.mutate(client, customer_id, operations, validate_only)
+    result: Dict[str, Any] = {
+        "campaign_id": campaign_id,
+        "name": row.get("campaign.name"),
+        "currency_code": row.get("customer.currency_code"),
+        "previous": {k: v for k, v in previous.items() if v},
+        "bidding_strategy": bidding_strategy,
+    }
+    for option, (value, _) in options.items():
+        if value is not None:
+            result[option] = value
+    if bidding_strategy == "MANUAL_CPC":
+        result["ad_group_default_bids"] = {
+            group["ad_group.name"]: (
+                default_cpc
+                if default_cpc is not None
+                else mutations.from_micros(group.get("ad_group.cpc_bid_micros"))
+            )
+            for group in ad_groups
+        }
+        if default_cpc is None:
+            result["next_steps"] = (
+                "Ad groups keep the default bids shown. Change them with "
+                "set_cpc_bids (one ad group), or call this tool again with "
+                "default_cpc."
+            )
+    result["validate_only"] = validate_only
+    return result
+
+
+class RsaHeadline(BaseModel):
+    """A responsive search ad headline, optionally pinned to a position."""
+
+    text: str = Field(description="Max 30 characters.")
+    pin: Literal["HEADLINE_1", "HEADLINE_2", "HEADLINE_3"] | None = Field(
+        default=None, description="Always show the headline in this position."
+    )
+
+
+class RsaDescription(BaseModel):
+    """A responsive search ad description, optionally pinned to a position."""
+
+    text: str = Field(description="Max 90 characters.")
+    pin: Literal["DESCRIPTION_1", "DESCRIPTION_2"] | None = Field(
+        default=None,
+        description="Always show the description in this position.",
+    )
+
+
+def _pinned_texts(
+    label: str,
+    items: List[Any] | None,
+    min_count: int,
+    max_count: int,
+    max_length: int,
+    positions: Tuple[str, ...],
+) -> List[Tuple[str, str | None]]:
+    """Validates ad texts given as strings or {text, pin} and returns
+    (text, pin) pairs, like check_texts."""
+    pairs = []
+    for item in items or []:
+        if isinstance(item, str):
+            text, pin = item, None
+        elif isinstance(item, dict):
+            text, pin = item.get("text"), item.get("pin")
+        else:
+            text, pin = item.text, item.pin
+        pairs.append(((text or "").strip(), pin))
+    texts = mutations.check_texts(
+        label, [text for text, _ in pairs], min_count, max_count, max_length
+    )
+    pins: Dict[str, str | None] = {}
+    for text, pin in pairs:
+        if not text:
+            continue
+        if pin is not None and pin not in positions:
+            raise ToolError(
+                f"{label}: pin must be one of {', '.join(positions)}, "
+                f"not {pin!r}."
+            )
+        if pins.setdefault(text, pin) != pin:
+            raise ToolError(f"{label}: {text!r} is given with two pins.")
+    return [(text, pins[text]) for text in texts]
+
+
+_DISPLAY_PATH_MAX = 15
+
+
+@campaigns_mcp.tool(annotations=_CREATE)
+def create_responsive_search_ad(
+    customer_id: str | int,
+    final_url: str,
+    headlines: List[str | RsaHeadline],
+    descriptions: List[str | RsaDescription],
+    ad_group_id: str | int | None = None,
+    campaign_id: str | int | None = None,
+    path1: str | None = None,
+    path2: str | None = None,
+    status: Literal["ENABLED", "PAUSED"] = "ENABLED",
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Adds a responsive search ad to an existing Search ad group.
+
+    Give ad_group_id, or campaign_id for a campaign with exactly one ad group.
+    Headlines and descriptions are strings, or {"text": ..., "pin": ...} to
+    pin one to a position (HEADLINE_1-3, DESCRIPTION_1-2). Pin sparingly:
+    pins limit the combinations Google can test.
+
+    Google reviews every new ad. Policy problems are reported with their
+    policy topics, e.g. DESTINATION_NOT_WORKING; fix the text or URL rather
+    than retrying. validate_only checks the ad, policy included, without
+    creating it.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        final_url: The landing page URL.
+        headlines: 3-15 headlines, max 30 characters each.
+        descriptions: 2-4 descriptions, max 90 characters each.
+        ad_group_id: The ad group to add the ad to.
+        campaign_id: A campaign with exactly one ad group, instead of ad_group_id.
+        path1: Optional display URL path, max 15 characters.
+        path2: Optional second display URL path, max 15 characters; needs path1.
+        status: ENABLED serves the ad once approved, if its ad group and
+          campaign are enabled (it never enables them). PAUSED creates it paused.
+        validate_only: If true, validates the request without creating anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The new ad's ID and resource name.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    headline_pairs = _pinned_texts(
+        "headlines",
+        headlines,
+        3,
+        15,
+        30,
+        ("HEADLINE_1", "HEADLINE_2", "HEADLINE_3"),
+    )
+    description_pairs = _pinned_texts(
+        "descriptions",
+        descriptions,
+        2,
+        4,
+        90,
+        ("DESCRIPTION_1", "DESCRIPTION_2"),
+    )
+    final_url = (final_url or "").strip()
+    if not final_url:
+        raise ToolError("final_url is required.")
+    for label, path in (("path1", path1), ("path2", path2)):
+        if path and len(path) > _DISPLAY_PATH_MAX:
+            raise ToolError(
+                f"{label} must be at most {_DISPLAY_PATH_MAX} characters: "
+                f"{path!r}."
+            )
+    if path2 and not path1:
+        raise ToolError("path2 needs path1.")
+    if status not in ("ENABLED", "PAUSED"):
+        raise ToolError("status must be ENABLED or PAUSED.")
+
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    group = mutations.find_ad_group(
+        client, customer_id, ad_group_id, campaign_id
+    )
+    if group.get("campaign.advertising_channel_type") != "SEARCH":
+        raise ToolError(
+            "Responsive search ads can only be added to Search campaigns."
+        )
+    ad_group_id = str(group["ad_group.id"])
+    if status == "ENABLED":
+        # An enabled ad lets the ad group's keywords serve.
+        guardrails.check_serving_cpc_bids(
+            client,
+            customer_id,
+            guardrails.get_limits(customer_id),
+            [
+                f"ad_group.id = {ad_group_id}",
+                "ad_group.status = 'ENABLED'",
+                "campaign.status = 'ENABLED'",
+            ],
+            "an enabled ad in this ad group",
+            "Create the ad PAUSED, or lower those bids first.",
+        )
+
+    op = client.get_type("MutateOperation")
+    ad_group_ad = op.ad_group_ad_operation.create
+    ad_group_ad.ad_group = mutations.resource_name(
+        customer_id, "adGroups", ad_group_id
+    )
+    ad_group_ad.status = client.enums.AdGroupAdStatusEnum[status]
+    ad_group_ad.ad.final_urls.append(final_url)
+    rsa = ad_group_ad.ad.responsive_search_ad
+    positions = client.enums.ServedAssetFieldTypeEnum
+    for pairs, target in (
+        (headline_pairs, rsa.headlines),
+        (description_pairs, rsa.descriptions),
+    ):
+        for text, pin in pairs:
+            ad_text = client.get_type("AdTextAsset")
+            ad_text.text = text
+            if pin:
+                ad_text.pinned_field = positions[pin]
+            target.append(ad_text)
+    if path1:
+        rsa.path1 = path1
+    if path2:
+        rsa.path2 = path2
+
+    results = mutations.mutate(
+        client,
+        customer_id,
+        [(op, f"responsive search ad in ad group {ad_group_id}")],
+        validate_only,
+    )
+    result: Dict[str, Any] = {
+        "ad_group_id": ad_group_id,
+        "ad_group": group.get("ad_group.name"),
+        "campaign_id": str(group.get("campaign.id")),
+        "status": status,
+    }
+    if validate_only:
+        result["message"] = "The ad is valid. Nothing was created."
+    else:
+        ad_rn = results["ad_group_ad"][0]
+        result["ad_id"] = mutations.last_id(ad_rn)
+        result["resource_name"] = ad_rn
+    result["validate_only"] = validate_only
+    return result
+
+
+@campaigns_mcp.tool(annotations=_UPDATE)
+def set_ad_status(
+    customer_id: str | int,
+    status: Literal["ENABLED", "PAUSED"],
+    ad_ids: List[str | int] | None = None,
+    ad_group_id: str | int | None = None,
+    resource_names: List[str] | None = None,
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Pauses or enables ads. Never removes them.
+
+    Identify ads by ad_ids within ad_group_id, and/or by ad_group_ad resource
+    names (customers/<customer id>/adGroupAds/<ad group id>~<ad id>). Find
+    them with the search tool: resource ad_group_ad, fields
+    ad_group_ad.resource_name, ad_group_ad.ad.id and ad_group_ad.status. If
+    any ad is not found, nothing changes. Enabling an ad does not enable its
+    ad group or campaign.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        status: ENABLED or PAUSED.
+        ad_ids: Ad IDs in ad_group_id.
+        ad_group_id: The ad group of ad_ids.
+        resource_names: ad_group_ad resource names.
+        validate_only: If true, validates the request without changing anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The ads changed and the ones already in that status.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    if status not in ("ENABLED", "PAUSED"):
+        raise ToolError("status must be ENABLED or PAUSED.")
+    wanted = []
+    if ad_ids:
+        if ad_group_id is None:
+            raise ToolError("ad_ids need ad_group_id, or use resource_names.")
+        group_id = mutations.parse_id(ad_group_id, "ad_group_id")
+        wanted += [
+            f"customers/{customer_id}/adGroupAds/{group_id}~"
+            f"{mutations.parse_id(ad_id, 'ad_id')}"
+            for ad_id in ad_ids
+        ]
+    for value in resource_names or []:
+        parts = mutations.parse_composite_id(
+            value, customer_id, "adGroupAds", "ad resource name"
+        )
+        if len(parts) != 2 or not all(re.fullmatch(r"\d+", p) for p in parts):
+            raise ToolError(
+                f"Invalid ad resource name '{value}'. Expected "
+                "customers/<customer id>/adGroupAds/<ad group id>~<ad id>."
+            )
+        wanted.append(f"customers/{customer_id}/adGroupAds/{'~'.join(parts)}")
+    wanted = list(dict.fromkeys(wanted))
+    if not wanted:
+        raise ToolError("Give ad_ids with ad_group_id, and/or resource_names.")
+
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    names = ", ".join(f"'{rn}'" for rn in wanted)
+    rows = mutations.search(
+        client,
+        customer_id,
+        "SELECT ad_group_ad.resource_name, ad_group_ad.status, "
+        "ad_group_ad.ad.id, ad_group_ad.ad.type, ad_group.id, campaign.id "
+        f"FROM ad_group_ad WHERE ad_group_ad.resource_name IN ({names})",
+    )
+    found = {row["ad_group_ad.resource_name"]: row for row in rows}
+    missing = [rn for rn in wanted if rn not in found]
+    if missing:
+        raise ToolError(f"Ads not found: {missing}. Nothing was changed.")
+    removed = [
+        rn for rn in wanted if found[rn]["ad_group_ad.status"] == "REMOVED"
+    ]
+    if removed:
+        raise ToolError(
+            f"Removed ads cannot be paused or enabled: {removed}. Nothing "
+            "was changed."
+        )
+
+    operations, changed, unchanged = [], [], []
+    for rn in wanted:
+        row = found[rn]
+        entry = {
+            "ad_id": str(row["ad_group_ad.ad.id"]),
+            "ad_group_id": str(row["ad_group.id"]),
+            "type": row.get("ad_group_ad.ad.type"),
+            "previous_status": row["ad_group_ad.status"],
+        }
+        if row["ad_group_ad.status"] == status:
+            unchanged.append(entry)
+            continue
+        op = client.get_type("MutateOperation")
+        ad_group_ad = op.ad_group_ad_operation.update
+        ad_group_ad.resource_name = rn
+        ad_group_ad.status = client.enums.AdGroupAdStatusEnum[status]
+        mutations.update_mask(
+            client, op.ad_group_ad_operation.update_mask, ["status"]
+        )
+        operations.append((op, f"ad {entry['ad_id']}"))
+        changed.append(entry)
+    if status == "ENABLED" and changed:
+        # An enabled ad lets its ad group's keywords serve.
+        ad_group_ids = ", ".join(
+            dict.fromkeys(e["ad_group_id"] for e in changed)
+        )
+        guardrails.check_serving_cpc_bids(
+            client,
+            customer_id,
+            guardrails.get_limits(customer_id),
+            [
+                f"ad_group.id IN ({ad_group_ids})",
+                "ad_group.status = 'ENABLED'",
+                "campaign.status = 'ENABLED'",
+            ],
+            "enabling these ads",
+            "Lower those bids first, e.g. with set_cpc_bids.",
+        )
+    if operations:
+        mutations.mutate(client, customer_id, operations, validate_only)
+    return {
+        "status": status,
+        "changed": changed,
+        "unchanged": unchanged,
+        "validate_only": validate_only,
+    }
+
+
+@campaigns_mcp.tool(annotations=_UPDATE)
+def update_ad_group(
+    customer_id: str | int,
+    ad_group_id: str | int,
+    name: str | None = None,
+    status: Literal["ENABLED", "PAUSED"] | None = None,
+    validate_only: bool = False,
+    login_customer_id: str | int | None = None,
+) -> Dict[str, Any]:
+    """Renames an ad group, or pauses or enables it. Never removes it.
+
+    Enabling an ad group does not enable its campaign. In a Manual CPC
+    campaign, enabling is refused while its keywords' bids are above the
+    max_cpc_bid guardrail. Change its default bid with set_cpc_bids.
+
+    Args:
+        customer_id: The Google Ads customer ID.
+        ad_group_id: The ad group ID (see get_campaign).
+        name: A new name, unique within the campaign.
+        status: ENABLED or PAUSED.
+        validate_only: If true, validates the request without changing anything.
+        login_customer_id: Optional manager customer ID to use as the login-customer-id header.
+
+    Returns:
+        The previous and new name and status.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    ad_group_id = mutations.parse_id(ad_group_id, "ad_group_id")
+    if name is None and status is None:
+        raise ToolError("Nothing to update: give name and/or status.")
+    if name is not None and not name.strip():
+        raise ToolError("name must not be empty.")
+    if status is not None and status not in ("ENABLED", "PAUSED"):
+        raise ToolError("status must be ENABLED or PAUSED.")
+    client = utils.get_googleads_client(login_customer_id=login_customer_id)
+    rows = mutations.search(
+        client,
+        customer_id,
+        "SELECT ad_group.name, ad_group.status, campaign.id FROM ad_group "
+        f"WHERE ad_group.id = {ad_group_id}",
+    )
+    if not rows:
+        raise ToolError(f"Ad group {ad_group_id} not found.")
+    row = rows[0]
+    if row.get("ad_group.status") == "REMOVED":
+        raise ToolError(f"Ad group {ad_group_id} was removed.")
+    if status == "ENABLED" and row.get("ad_group.status") != "ENABLED":
+        # Its keywords serve once it is enabled, if its campaign is.
+        guardrails.check_serving_cpc_bids(
+            client,
+            customer_id,
+            guardrails.get_limits(customer_id),
+            [f"ad_group.id = {ad_group_id}", "campaign.status = 'ENABLED'"],
+            "enabling this ad group",
+            "Lower those bids first, e.g. with set_cpc_bids.",
+        )
+
+    op = client.get_type("MutateOperation")
+    ad_group = op.ad_group_operation.update
+    ad_group.resource_name = mutations.resource_name(
+        customer_id, "adGroups", ad_group_id
+    )
+    paths = []
+    result: Dict[str, Any] = {
+        "ad_group_id": ad_group_id,
+        "campaign_id": str(row.get("campaign.id")),
+    }
+    if name is not None:
+        ad_group.name = name.strip()
+        paths.append("name")
+        result["previous_name"] = row.get("ad_group.name")
+        result["name"] = ad_group.name
+    if status is not None:
+        ad_group.status = client.enums.AdGroupStatusEnum[status]
+        paths.append("status")
+        result["previous_status"] = row.get("ad_group.status")
+        result["status"] = status
+    mutations.update_mask(client, op.ad_group_operation.update_mask, paths)
+    mutations.mutate(
+        client, customer_id, [(op, f"ad group {ad_group_id}")], validate_only
+    )
     result["validate_only"] = validate_only
     return result

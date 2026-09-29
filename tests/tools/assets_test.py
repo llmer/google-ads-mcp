@@ -225,5 +225,136 @@ class TestAssetReads(MutateToolTestCase):
         )
 
 
+def _link(asset_id, field_type, campaign_id=5, **asset_fields):
+    return {
+        "campaign_asset.resource_name": (
+            f"customers/1/campaignAssets/{campaign_id}~{asset_id}~{field_type}"
+        ),
+        "campaign_asset.field_type": field_type,
+        "campaign.id": campaign_id,
+        "asset.id": asset_id,
+        "asset.name": "",
+        **asset_fields,
+    }
+
+
+class TestRemoveCampaignAssets(MutateToolTestCase):
+
+    def _unlinked(self):
+        [operations] = self.mutate_calls()
+        # Links are removed; assets are never touched.
+        self.assertTrue(
+            all(
+                op._pb.WhichOneof("operation") == "campaign_asset_operation"
+                and op.campaign_asset_operation._pb.WhichOneof("operation")
+                == "remove"
+                for op in operations
+            )
+        )
+        return [op.campaign_asset_operation.remove for op in operations]
+
+    def test_unlinks_by_asset_id_and_field_type(self):
+        self.search_results = [
+            [
+                _link(
+                    9,
+                    "CALLOUT",
+                    **{"asset.callout_asset.callout_text": "Free shipping"},
+                )
+            ]
+        ]
+        result = assets.remove_campaign_assets(
+            "1", campaign_id=5, asset_ids=[9], field_type="CALLOUT"
+        )
+        self.assertEqual(
+            self._unlinked(), ["customers/1/campaignAssets/5~9~CALLOUT"]
+        )
+        for condition in [
+            "campaign.id = 5",
+            "asset.id IN (9)",
+            "campaign_asset.field_type = 'CALLOUT'",
+            "campaign_asset.status != 'REMOVED'",
+        ]:
+            self.assertIn(condition, self.queries[0])
+        self.assertEqual(
+            result["unlinked"],
+            [
+                {
+                    "campaign_id": "5",
+                    "asset_id": "9",
+                    "field_type": "CALLOUT",
+                    "text": "Free shipping",
+                }
+            ],
+        )
+
+    def test_without_field_type_unlinks_every_link_of_the_asset(self):
+        self.search_results = [
+            [_link(13, "BUSINESS_LOGO"), _link(13, "AD_IMAGE")]
+        ]
+        result = assets.remove_campaign_assets(
+            "1", campaign_id=5, asset_ids=["13"]
+        )
+        self.assertEqual(
+            self._unlinked(),
+            [
+                "customers/1/campaignAssets/5~13~BUSINESS_LOGO",
+                "customers/1/campaignAssets/5~13~AD_IMAGE",
+            ],
+        )
+        self.assertNotIn("field_type =", self.queries[0])
+        self.assertEqual(len(result["unlinked"]), 2)
+
+    def test_unlinks_by_resource_name(self):
+        rn = "customers/1/campaignAssets/6~9~SITELINK"
+        self.search_results = [
+            [
+                _link(
+                    9,
+                    "SITELINK",
+                    campaign_id=6,
+                    **{"asset.sitelink_asset.link_text": "Pricing"},
+                )
+            ]
+        ]
+        result = assets.remove_campaign_assets("1", resource_names=[rn])
+        self.assertEqual(self._unlinked(), [rn])
+        self.assertIn(
+            f"campaign_asset.resource_name IN ('{rn}')", self.queries[0]
+        )
+        self.assertEqual(result["unlinked"][0]["text"], "Pricing")
+
+    def test_missing_link_changes_nothing(self):
+        self.search_results = [[_link(9, "CALLOUT")]]
+        with self.assertRaisesRegex(ToolError, "asset 10"):
+            assets.remove_campaign_assets("1", campaign_id=5, asset_ids=[9, 10])
+        self.service.mutate.assert_not_called()
+
+    def test_rejects_invalid_input(self):
+        for kwargs in [
+            {},
+            {"asset_ids": [9]},
+            {"campaign_id": 5, "field_type": "CALLOUT"},
+            {"campaign_id": 5, "asset_ids": [9], "field_type": "HEADLINE"},
+            {"campaign_id": 5, "asset_ids": ["9 OR 1=1"]},
+            {"resource_names": ["customers/2/campaignAssets/5~9~CALLOUT"]},
+            {"resource_names": ["customers/1/campaignAssets/5~9"]},
+            {"resource_names": ["5~9~CALLOUT' OR 'a'='a"]},
+        ]:
+            with self.assertRaises(ToolError, msg=kwargs):
+                assets.remove_campaign_assets("1", **kwargs)
+        self.assertEqual(self.queries, [])
+
+    def test_validate_only(self):
+        self.search_results = [[_link(9, "CALLOUT")]]
+        result = assets.remove_campaign_assets(
+            "1", campaign_id=5, asset_ids=[9], validate_only=True
+        )
+        self.assertTrue(
+            self.service.mutate.call_args.kwargs["request"].validate_only
+        )
+        self.assertTrue(result["validate_only"])
+
+
 if __name__ == "__main__":
     unittest.main()
