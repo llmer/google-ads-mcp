@@ -28,6 +28,8 @@ from google.ads.googleads.v25.services.services.google_ads_service import (
 
 from google.ads.googleads.util import get_nested_attr
 import google.auth
+from google.auth.exceptions import DefaultCredentialsError
+from ads_mcp import oauth_credentials
 from ads_mcp.mcp_header_interceptor import MCPHeaderInterceptor
 import os
 import re
@@ -43,10 +45,11 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# OAuth scope for the Google Ads API. Google Ads does not publish a separate
-# read-only scope; to run a read-only server, disable the namespaces of
-# mutating tools in tools_config.yaml.
-_ADS_SCOPE = "https://www.googleapis.com/auth/adwords"
+# OAuth scope for the Google Ads API (see ads_mcp/oauth_credentials.py).
+_ADS_SCOPE = oauth_credentials.ADS_SCOPE
+
+# The credentials source logged last, so that each change is logged once.
+_credentials_source: str | None = None
 
 
 @contextlib.contextmanager
@@ -68,8 +71,24 @@ def prevent_stdio_inheritance():
         yield
 
 
+def _log_credentials_source(source: str) -> None:
+    """Logs where Google Ads API credentials come from, when that changes."""
+    global _credentials_source
+    if source != _credentials_source:
+        _credentials_source = source
+        logger.info("Google Ads API credentials: %s", source)
+
+
 def _create_credentials() -> google.auth.credentials.Credentials:
-    """Returns Application Default Credentials with the Google Ads scope, or the FastMCP token if found."""
+    """Returns the credentials for Google Ads API calls.
+
+    In order of precedence:
+      1. The MCP client's access token, when FastMCP's OAuth proxy is enabled.
+      2. The OAuth credentials file written by google-ads-mcp-authorize:
+         $GOOGLE_ADS_OAUTH_CREDENTIALS, which must then exist, or else
+         ~/.config/google-ads-mcp/oauth_credentials.json if it exists.
+      3. Application Default Credentials with the Google Ads scope.
+    """
     from fastmcp.server.dependencies import get_access_token
     from google.oauth2.credentials import Credentials
 
@@ -78,6 +97,20 @@ def _create_credentials() -> google.auth.credentials.Credentials:
         # Create credentials using the access token provided by FastMCP
         return Credentials(token=token_obj.token)
 
+    path, explicit = oauth_credentials.credentials_path()
+    file_credentials = oauth_credentials.load_credentials(path)
+    if file_credentials is not None:
+        _log_credentials_source(f"OAuth credentials file {path}")
+        return file_credentials
+    if explicit:
+        # Falling back would silently switch to another Google identity.
+        env_var = oauth_credentials.CREDENTIALS_PATH_ENV_VAR
+        raise DefaultCredentialsError(
+            f"{env_var} is set to {path}, but that file does not exist."
+            f" Create it with google-ads-mcp-authorize, or unset {env_var}."
+        )
+
+    _log_credentials_source("Application Default Credentials")
     with prevent_stdio_inheritance():
         credentials, _ = google.auth.default(scopes=[_ADS_SCOPE])
     return credentials

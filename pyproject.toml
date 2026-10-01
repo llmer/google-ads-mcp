@@ -10,7 +10,8 @@ license = "Apache-2.0"
 dependencies = [
     "google-ads>=32.0.0",
     "mcp[cli]==2.0.0",
-    "fastmcp>=4.0.3"
+    "fastmcp>=4.0.3",
+    "google-auth-oauthlib>=1.0.0",
 ]
 
 description = "MCP Server for Google Ads, depends on Google Ads API."
@@ -48,3 +49,4 @@ include = ["ads_mcp*"]
 [project.scripts]
 google-ads-mcp = "ads_mcp.server:run_server"
 google-ads-mcp-update-gaql = "ads_mcp.update_references:update_gaql_resource_file"
+google-ads-mcp-authorize = "ads_mcp.oauth_credentials:main"
