@@ -384,6 +384,57 @@ following message. You will need this for a later step!
 Credentials saved to file: [PATH_TO_CREDENTIALS_JSON]
 ```
 
+If calls start failing with `Reauthentication is needed`, switch to
+[durable credentials](#durable-credentials-no-daily-re-auth).
+
+#### Durable credentials (no daily re-auth)
+
+Credentials from `gcloud auth application-default login` carry the Cloud
+Platform scope, which gcloud requires, so a Google Cloud session control
+policy can make them expire after a set number of hours. Every call then fails
+with `Reauthentication is needed. Please run gcloud auth application-default
+login`. To avoid this, give the server its own OAuth refresh token, limited to
+the Google Ads scope. You only do this once:
+
+1.  Make sure the OAuth consent screen of your Google Cloud project is
+    **In production**, or uses the **Internal** user type if the project
+    belongs to a Google Workspace organization. While it is in **Testing**,
+    refresh tokens expire after 7 days, and you would have to repeat the next
+    step every week.
+
+1.  Run the authorization from your checkout with the JSON file of a
+    **Desktop app** OAuth client (see
+    [Manage OAuth Clients](https://support.google.com/cloud/answer/15549257)).
+    It opens your browser to grant access to Google Ads, then saves the
+    refresh token to `~/.config/google-ads-mcp/oauth_credentials.json`,
+    readable only by you:
+
+    ```shell
+    uv --directory "$GOOGLE_ADS_MCP_DIR" run google-ads-mcp-authorize \
+      --client-secret YOUR_CLIENT_JSON_FILE
+    ```
+
+    To save it somewhere else, add `--out PATH` and set
+    `GOOGLE_ADS_OAUTH_CREDENTIALS=PATH` in the server's environment. The
+    command refuses folders where the file might be readable by other users:
+    on macOS, folders whose access control list new files inherit, and on
+    Windows, folders outside your user profile.
+
+1.  Restart the MCP server. In Claude Code, run `/mcp`, select the server and
+    reconnect it.
+
+While this file exists, the server uses it instead of Application Default
+Credentials, and logs which of the two it uses, never the credentials
+themselves. Access tokens are refreshed automatically as they expire, so a
+long-running server keeps working. The developer token and login customer ID
+settings do not change, and `GOOGLE_APPLICATION_CREDENTIALS` is no longer
+needed. To go back to Application Default Credentials, delete the file, and
+unset `GOOGLE_ADS_OAUTH_CREDENTIALS` if you set it: a file named there must
+exist, so that the server never switches to another Google account silently.
+The file grants access to your Google Ads accounts: keep it private, and
+remove the app's access from your
+[Google Account](https://myaccount.google.com/connections) if it leaks.
+
 #### Option 3: Configure credentials using the Google Ads API Python client library.
 
 [Follow the instructions](https://developers.google.com/google-ads/api/docs/client-libs/python/)
@@ -525,8 +576,9 @@ The final file will look like this:
 These steps run the MCP server from a local checkout of this repository and
 install the [agent skill](skills/google-ads/SKILL.md), so Claude Code can
 use them in any project. They assume you have completed the credential steps
-above (Application Default Credentials or a `google-ads.yaml` file) and have a
-developer token.
+above (Application Default Credentials,
+[durable credentials](#durable-credentials-no-daily-re-auth) or a
+`google-ads.yaml` file) and have a developer token.
 
 1.  **Install [uv](https://docs.astral.sh/uv/getting-started/installation/)
     and clone the repository.** Use an absolute path you will keep; the
@@ -569,7 +621,7 @@ developer token.
     access accounts through a manager account. Omit
     `GOOGLE_APPLICATION_CREDENTIALS` if you use `gcloud auth
     application-default login`, which stores credentials in the default
-    location.
+    location, or [durable credentials](#durable-credentials-no-daily-re-auth).
 
     To share the setup with a team through a project's repository instead, add
     a `.mcp.json` file at the project root. Claude Code expands `${VAR}` from
